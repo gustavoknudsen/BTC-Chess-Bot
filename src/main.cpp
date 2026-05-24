@@ -20,6 +20,7 @@ int main()
     initAll();
 
     clearTT();
+    clearSearchHeuristics();
 
     int debug = 0;
 

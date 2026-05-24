@@ -29,8 +29,13 @@ extern int inc;
 // UCI "starttime" command time holder
 extern int starttime;
 
-// UCI "stoptime" command time holder
+// UCI "stoptime" command time holder. This is the HARD cap. Once getTime()
+// crosses stoptime, communicate() sets stopped = 1 and the search aborts.
 extern int stoptime;
+
+// soft target. iterative deepening should not start a new iteration if
+// elapsed time has crossed roughly half of softLimit. updated by parseGo.
+extern int softLimit;
 
 // variable to flag time control availability
 extern int timeset;

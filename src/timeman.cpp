@@ -18,8 +18,12 @@ int inc = 0;
 // UCI "starttime" command time holder
 int starttime = 0;
 
-// UCI "stoptime" command time holder
+// UCI "stoptime" command time holder (hard cap)
 int stoptime = 0;
+
+// soft target used by iterative deepening to decide whether to start a new
+// iteration. set by parseGo. zero means "no soft limit set".
+int softLimit = 0;
 
 // variable to flag time control availability
 int timeset = 0;

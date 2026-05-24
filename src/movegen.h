@@ -46,6 +46,199 @@ static inline int isUnderAttack(int square, int attackingSide)
 // print attacked squares (for testing)
 void printAttackedSquares(int sideAttacker);
 
+// generate captures only (including capture-promotions and en passant).
+// non-capture promotions and castling are intentionally skipped.
+// used by quiescence search.
+static inline void generateCaptures(moves *moveList)
+{
+    moveList->count = 0;
+
+    int sourceSquare;
+    int targetSquare;
+    U64 bitboard;
+    U64 attacks;
+
+    for (int piece = P; piece <= k; piece++)
+    {
+        bitboard = bitboards[piece];
+
+        if (side == white)
+        {
+            // white pawn captures (and capture-promotions)
+            if (piece == P)
+            {
+                while (bitboard)
+                {
+                    sourceSquare = getLSFBIndex(bitboard);
+
+                    attacks = pawnAttacks[side][sourceSquare] & occupancies[black];
+                    while (attacks)
+                    {
+                        targetSquare = getLSFBIndex(attacks);
+
+                        if (sourceSquare >= a7 && sourceSquare <= h7)
+                        {
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, Q, 1, 0, 0, 0));
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, R, 1, 0, 0, 0));
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, N, 1, 0, 0, 0));
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, B, 1, 0, 0, 0));
+                        }
+                        else
+                        {
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, 0, 1, 0, 0, 0));
+                        }
+
+                        popBit(attacks, targetSquare);
+                    }
+
+                    if (enpassant != noSq)
+                    {
+                        U64 enpassantAttacks = pawnAttacks[side][sourceSquare] & (1ULL << enpassant);
+                        if (enpassantAttacks)
+                        {
+                            int targetEnpassant = getLSFBIndex(enpassantAttacks);
+                            addMove(moveList, encodeMove(sourceSquare, targetEnpassant, piece, 0, 1, 0, 1, 0));
+                        }
+                    }
+
+                    popBit(bitboard, sourceSquare);
+                }
+            }
+        }
+        else
+        {
+            // black pawn captures (and capture-promotions)
+            if (piece == p)
+            {
+                while (bitboard)
+                {
+                    sourceSquare = getLSFBIndex(bitboard);
+
+                    attacks = pawnAttacks[side][sourceSquare] & occupancies[white];
+                    while (attacks)
+                    {
+                        targetSquare = getLSFBIndex(attacks);
+
+                        if (sourceSquare >= a2 && sourceSquare <= h2)
+                        {
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, q, 1, 0, 0, 0));
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, r, 1, 0, 0, 0));
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, n, 1, 0, 0, 0));
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, b, 1, 0, 0, 0));
+                        }
+                        else
+                        {
+                            addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, 0, 1, 0, 0, 0));
+                        }
+
+                        popBit(attacks, targetSquare);
+                    }
+
+                    if (enpassant != noSq)
+                    {
+                        U64 enpassantAttacks = pawnAttacks[side][sourceSquare] & (1ULL << enpassant);
+                        if (enpassantAttacks)
+                        {
+                            int targetEnpassant = getLSFBIndex(enpassantAttacks);
+                            addMove(moveList, encodeMove(sourceSquare, targetEnpassant, piece, 0, 1, 0, 1, 0));
+                        }
+                    }
+
+                    popBit(bitboard, sourceSquare);
+                }
+            }
+        }
+
+        // knight captures
+        if ((side == white) ? piece == N : piece == n)
+        {
+            while (bitboard)
+            {
+                sourceSquare = getLSFBIndex(bitboard);
+                attacks = knightAttacks[sourceSquare] & ((side == white) ? occupancies[black] : occupancies[white]);
+                while (attacks)
+                {
+                    targetSquare = getLSFBIndex(attacks);
+                    addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, 0, 1, 0, 0, 0));
+                    popBit(attacks, targetSquare);
+                }
+                popBit(bitboard, sourceSquare);
+            }
+        }
+
+        // bishop captures
+        if ((side == white) ? piece == B : piece == b)
+        {
+            while (bitboard)
+            {
+                sourceSquare = getLSFBIndex(bitboard);
+                attacks = getBishopAttacks(sourceSquare, occupancies[both]) &
+                            ((side == white) ? occupancies[black] : occupancies[white]);
+                while (attacks)
+                {
+                    targetSquare = getLSFBIndex(attacks);
+                    addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, 0, 1, 0, 0, 0));
+                    popBit(attacks, targetSquare);
+                }
+                popBit(bitboard, sourceSquare);
+            }
+        }
+
+        // rook captures
+        if ((side == white) ? piece == R : piece == r)
+        {
+            while (bitboard)
+            {
+                sourceSquare = getLSFBIndex(bitboard);
+                attacks = getRookAttacks(sourceSquare, occupancies[both]) &
+                            ((side == white) ? occupancies[black] : occupancies[white]);
+                while (attacks)
+                {
+                    targetSquare = getLSFBIndex(attacks);
+                    addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, 0, 1, 0, 0, 0));
+                    popBit(attacks, targetSquare);
+                }
+                popBit(bitboard, sourceSquare);
+            }
+        }
+
+        // queen captures
+        if ((side == white) ? piece == Q : piece == q)
+        {
+            while (bitboard)
+            {
+                sourceSquare = getLSFBIndex(bitboard);
+                attacks = getQueenAttacks(sourceSquare, occupancies[both]) &
+                            ((side == white) ? occupancies[black] : occupancies[white]);
+                while (attacks)
+                {
+                    targetSquare = getLSFBIndex(attacks);
+                    addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, 0, 1, 0, 0, 0));
+                    popBit(attacks, targetSquare);
+                }
+                popBit(bitboard, sourceSquare);
+            }
+        }
+
+        // king captures
+        if ((side == white) ? piece == K : piece == k)
+        {
+            while (bitboard)
+            {
+                sourceSquare = getLSFBIndex(bitboard);
+                attacks = kingAttacks[sourceSquare] & ((side == white) ? occupancies[black] : occupancies[white]);
+                while (attacks)
+                {
+                    targetSquare = getLSFBIndex(attacks);
+                    addMove(moveList, encodeMove(sourceSquare, targetSquare, piece, 0, 1, 0, 0, 0));
+                    popBit(attacks, targetSquare);
+                }
+                popBit(bitboard, sourceSquare);
+            }
+        }
+    }
+}
+
 // generate all moves (not all legal)
 static inline void generateMoves(moves *moveList)
 {

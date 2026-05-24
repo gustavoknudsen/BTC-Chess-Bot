@@ -29,6 +29,9 @@ Thumbs.db
 # reference material kept locally only
 .stockfish_src/
 
+# internal development context (handover for new chat sessions)
+HANDOVER.md
+
 # uci client side files
 *.uci_options
 
