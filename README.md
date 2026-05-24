@@ -1,6 +1,6 @@
 
 # BetterThanCris Chess Bot in C(++)
- - Bot was written primarily in C but utilises a few C++ features. The source code is in a `.cpp` file but follows C programming conventions and structure.
+ - Bot was written primarily in C but utilises a few C++ features. Most of the code is in `.cpp` files but follows C programming conventions and structure.
 ## Table of Contents 
  1. [Introduction](#introduction)
  2. [Strength](#strength)  
