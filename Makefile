@@ -86,5 +86,6 @@ test: $(PERFT)
 
 clean:
 	-rm -f $(ENGINE) $(ENGINE_DEBUG) $(PERFT)
+	-rm -f engine_current.exe engine_no_contempt.exe engine_old_time.exe engine_baseline.exe
 	-rm -f engine43.exe engine52.exe
 	-rm -f perft_out.txt

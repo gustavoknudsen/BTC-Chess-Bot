@@ -9,6 +9,7 @@
 #include "timeman.h"
 #include "version.h"
 
+
 // adjust for delay (like in lichess)
 int moveOverhead = 50;
 
@@ -295,30 +296,26 @@ void parseGo(const char *command)
                                 0.9 * time / (double)timeLeft);
         }
 
+        int optimalTime = (int)(optScale * timeLeft);
+
         // soft target time and hard cap. soft is what we aim for. hard is
         // the wall we never cross. for short time controls the formula
-        // above can over-commit, so we also enforce a sanity cap of
-        // 1/20 of remaining time as the soft target floor.
-        int optimalTime = (int)(optScale * timeLeft);
+        // above can over-commit, so we enforce a sanity cap of 1/20 of
+        // remaining time as the soft target floor.
         int sanityCap = (time - moveOverhead) / 20;
         if (sanityCap > 0 && optimalTime > sanityCap) optimalTime = sanityCap;
         if (optimalTime < 1) optimalTime = 1;
 
         // hard cap: never spend more than 1/4 of remaining time on a single
-        // move, and never more than 2.5x the optimum (since extending past
-        // that is rarely worth it). this is the actual stoptime.
+        // move, and never more than 2.5x the optimum.
         int hardCap = std::min((int)((time - moveOverhead) / 4),
                                (int)(2.5 * optimalTime));
         if (hardCap < optimalTime) hardCap = optimalTime;
 
-        // soft target for iterative deepening to consult between iterations
         softLimit = optimalTime;
-
-        // stoptime is the HARD cap that communicate() compares against
         stoptime = starttime + hardCap;
 
-        // emergency: at very low clock, just play instantly with a tiny
-        // budget so we do not flag
+        // emergency: at very low clock, play almost instantly to not flag
         if (time < 1500) {
             int emergencyTime = time / 2 + inc - moveOverhead;
             if (emergencyTime < 10) emergencyTime = 10;

@@ -118,12 +118,13 @@
 	- Bonus on Cutoff, Malus on Non-Best Moves at the Same Node
 	- Histories Now Carry Across Moves (Reset Only on `ucinewgame`)
 - Added Single-Legal-Move Fast Path (Skip Search When Forced)
-- Added Contempt-Aware Draw Scoring (Both Sides Prefer Play-On in Roughly Even Positions)
 - Time Management Rewrite:
 	- Separated Soft Target (`softLimit`) and Hard Cap (`stoptime`)
 	- Iterative Deepening Skips Iterations That Cannot Finish in Budget
 	- No Aspiration Retry After a Stopped Search
 	- Roughly 35% Less Overshoot at 2min+1s Time Control
+- Briefly Added Then Removed Contempt-Aware Draw Scoring
+	- A/B Tournament Showed Contempt Cost ~70 Elo; Reverted to Plain Draw Return
 
 **Version 2.4 - 22/05/2026**
 - Refactored Engine Into Modular `src/` Layout

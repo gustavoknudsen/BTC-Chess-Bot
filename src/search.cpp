@@ -423,13 +423,6 @@ static inline int quiescence(int alpha, int beta)
 extern const int fullDepthMoves = 5;
 extern const int reductionLimit = 2;
 
-// contempt in centipawns. positive means both sides slightly prefer to play
-// on rather than draw. the draw is scored as -DRAW_CONTEMPT from the side-to-
-// move's perspective, so any continuation worth more than -DRAW_CONTEMPT
-// (which includes nearly all positions where we are not already losing
-// significantly) is preferred to the draw. when actually losing, the engine
-// still takes the draw (since the draw score -10 beats e.g. a -300 line).
-#define DRAW_CONTEMPT 30
 
 // negamax alpha beta search
 static inline int negamax(int alpha, int beta, int depth)
@@ -442,33 +435,9 @@ static inline int negamax(int alpha, int beta, int depth)
 
     int pvNode = beta - alpha > 1;
 
-    // repetition / fifty-move draws (gated on ply so root always returns a move).
-    // instead of a plain return 0, we return a contempt-adjusted draw score so
-    // both sides prefer to keep playing in slightly favourable positions.
+    // repetition / fifty-move draws (gated on ply so root always returns a move)
     if (ply && (isRepetition() || fifty >= 100))
-    {
-        int drawScore = -DRAW_CONTEMPT;
-
-        if (!pvNode)
-        {
-            // in non-pv nodes we can fail-cutoff against the draw score
-            if (drawScore <= alpha) return alpha;
-            if (drawScore >= beta)  return beta;
-            // otherwise tighten alpha but keep searching (rare path; depth
-            // was zero at the recurse so the search returns from the leaf
-            // before any further moves anyway)
-            alpha = drawScore;
-        }
-        else
-        {
-            // in pv nodes only tighten alpha if the draw improves on it
-            if (drawScore > alpha)
-            {
-                alpha = drawScore;
-                if (alpha >= beta) return beta;
-            }
-        }
-    }
+        return 0;
 
     // mate distance pruning
     if (ply)
