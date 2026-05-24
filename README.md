@@ -13,13 +13,13 @@
  - Aggressive & Entertaining Chess
  - Created by Gustavo Knudsen
  - UCI Protocol Chess Engine
- - Current Version: 2.4
+ - Current Version: 2.5
  - Is, In Fact, Better Than Cris
 ## Strength
-**Version 2.3**
+**Version 2.5**
 - [CCRL](https://www.computerchess.org.uk/ccrl/404/) Blitz Rating [Estimate](https://docs.google.com/spreadsheets/d/1t2gDEfoMDtqAA5uL9U_GPA9CijjlMrVK4AR4DiAqqGU/edit?usp=sharing): 2071 ± 20
 - [Lichess](https://lichess.org/@/BetterThanCris) (Playing Almost Exclusively Against Other Bots):
-	- Bullet: 2206 Peak, Blitz: 2101 Peak
+	- Bullet: 2301 Peak, Blitz: 2267 Peak
 - Against Humans, Especially in Bullet or Blitz, Rating can be Expected to be Higher
 - [Sample Games](https://www.chess.com/c/2j3KdGsGr)
 ## Features
@@ -31,15 +31,22 @@
  - Magic Bitboards:
 	 - Magic Number Generator (Off by Default)
 	 - Sliding Pieces
-- Simple Time Management
+- Time Management:
+	- Soft Target / Hard Cap Split
+	- Skip Iterations That Cannot Finish in Budget
 - Perft Test
 	 
  **Search:**
  - Negamax Search w/ Alpha Beta Pruning
- - Quiescence Search
+ - Quiescence Search:
+	- Captures-Only Move Generator
+	- SEE Pruning of Losing Captures
  - Iterative Deepening
  - Aspiration Windows
- - Move Ordering
+ - Move Ordering:
+	- Static Exchange Evaluation (SEE)
+	- Good vs Bad Capture Classification
+	- MVV/LVA + Capture History
  - Principle Variation Search (PVS)
  - PV Node Pruning
  - Null Move Pruning
@@ -47,11 +54,17 @@
  - Razoring
  - Late Move Reductions (LMR)
  - Mate Distance Pruning
- - History Moves
+ - Gravity History:
+	- Main History (Quiet Moves)
+	- Capture History (By Captured Piece)
+	- 1-Ply Continuation History
+	- Carryover Across Moves Within a Game
  - Killer Moves
  - Transposition Table w/ Zobrist Hashing
  - Hash Move Ordering
  - Repetitions
+ - Contempt-Aware Draw Scoring
+ - Single-Legal-Move Fast Path
 
 **Evaluation**
 - Material Evaluation
@@ -77,6 +90,9 @@
 - Improve General Evaluation
 	- Outposts | Strong Squares | Piece Attacks | Passed Pawn Improvement | Trapped Pieces
 - Improve Time Management
+	- Best-Move Stability | Fail-Low at Root Extension
+- Improve Transposition Table
+	- Depth-Preferred Replacement | Bucketed Slots
 - Add Pattern Evaluations
 - Improve Mobility
 - Add Space Evaluation
@@ -88,7 +104,28 @@
  - If online, can be played on  [Lichess](https://lichess.org/@/BetterThanCris) 
  - Can also be downloaded and ran like a normal UCI engine locally on a GUI
 ## Releases
-**Version 2.4 - 24/05/2026**
+**Version 2.5 - 24/05/2026**
+- Added Static Exchange Evaluation (SEE):
+	- Bad-Capture Pruning in Quiescence
+	- Good vs Bad Capture Classification in Move Ordering
+- Quiescence Overhaul:
+	- Captures-Only Move Generator (No More Filtering All Moves Down to Captures)
+	- SEE-Based Skip of Losing Captures
+- Gravity History Overhaul:
+	- Replaced Flat History With Bounded Gravity Updates
+	- Added Capture History Indexed by Captured Piece
+	- Added 1-Ply Continuation History
+	- Bonus on Cutoff, Malus on Non-Best Moves at the Same Node
+	- Histories Now Carry Across Moves (Reset Only on `ucinewgame`)
+- Added Single-Legal-Move Fast Path (Skip Search When Forced)
+- Added Contempt-Aware Draw Scoring (Both Sides Prefer Play-On in Roughly Even Positions)
+- Time Management Rewrite:
+	- Separated Soft Target (`softLimit`) and Hard Cap (`stoptime`)
+	- Iterative Deepening Skips Iterations That Cannot Finish in Budget
+	- No Aspiration Retry After a Stopped Search
+	- Roughly 35% Less Overshoot at 2min+1s Time Control
+
+**Version 2.4 - 22/05/2026**
 - Refactored Engine Into Modular `src/` Layout
 - Added Mate Distance Pruning
 - Fixed Critical Search Bugs:

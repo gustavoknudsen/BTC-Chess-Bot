@@ -282,14 +282,11 @@ void parseGo(const char *command)
         // Apply slow mover factor
         timeLeft = (timeLeft * slowMover) / 100;
 
-        // Dynamic time scaling based on position and game phase
-        // (the previous formulas used "ply" which is the search ply and is
-        //  reset to 0 between searches, so the scaling never actually moved.
-        //  moveNumber is the game's halfmove counter and grows over the game)
+        // Dynamic time scaling based on position and game phase.
+        // optScale is a fraction of timeLeft we plan to spend on this move.
         double optScale;
         if (movestogo == 0) {
-            // Sudden death time control
-            // This formula increases time usage as the game progresses
+            // sudden death
             optScale = std::min(0.01 + std::sqrt(moveNumber + 3) * 0.004,
                                0.2 * time / (double)timeLeft);
         } else {
@@ -298,27 +295,35 @@ void parseGo(const char *command)
                                 0.9 * time / (double)timeLeft);
         }
 
-        // Calculate optimal and maximum time
+        // soft target time and hard cap. soft is what we aim for. hard is
+        // the wall we never cross. for short time controls the formula
+        // above can over-commit, so we also enforce a sanity cap of
+        // 1/20 of remaining time as the soft target floor.
         int optimalTime = (int)(optScale * timeLeft);
-        int maximumTime = std::min((int)(0.8 * time - moveOverhead),
-                                  (int)(6.0 * optimalTime));
-
-        // Hard cap optimal at maximum so we never schedule a stop further
-        // than the safe upper bound (also protects against odd small
-        // negative cases in the formulas)
-        if (optimalTime > maximumTime) optimalTime = maximumTime;
+        int sanityCap = (time - moveOverhead) / 20;
+        if (sanityCap > 0 && optimalTime > sanityCap) optimalTime = sanityCap;
         if (optimalTime < 1) optimalTime = 1;
 
-        // Set stop time based on calculated values
-        stoptime = starttime + optimalTime;
+        // hard cap: never spend more than 1/4 of remaining time on a single
+        // move, and never more than 2.5x the optimum (since extending past
+        // that is rarely worth it). this is the actual stoptime.
+        int hardCap = std::min((int)((time - moveOverhead) / 4),
+                               (int)(2.5 * optimalTime));
+        if (hardCap < optimalTime) hardCap = optimalTime;
 
-        // If we're in a critical situation, adjust time
+        // soft target for iterative deepening to consult between iterations
+        softLimit = optimalTime;
+
+        // stoptime is the HARD cap that communicate() compares against
+        stoptime = starttime + hardCap;
+
+        // emergency: at very low clock, just play instantly with a tiny
+        // budget so we do not flag
         if (time < 1500) {
-            // Logic for very low time situations
             int emergencyTime = time / 2 + inc - moveOverhead;
-            // clamp so we never go negative or to zero with very low clock
             if (emergencyTime < 10) emergencyTime = 10;
             stoptime = starttime + emergencyTime;
+            softLimit = emergencyTime;
         }
     }
 
@@ -397,8 +402,9 @@ void uciLoop()
         // check 'ucinewgame' command
         else if (strncmp(input, "ucinewgame", 10) == 0)
         {
-            // clear tt
+            // clear tt and search heuristics on new game
             clearTT();
+            clearSearchHeuristics();
 
             // call position with 'startpos'
             parsePosition("position startpos");

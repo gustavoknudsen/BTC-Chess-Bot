@@ -8,6 +8,10 @@
 #include "evaluation.h"
 #include "tt.h"
 #include "timeman.h"
+#include "see.h"
+
+#include <stdint.h>
+#include <stdlib.h>
 
 // table for mvvlva
 /*
@@ -43,30 +47,15 @@ int mvvlva[12][12] = {
 // 2 killer moves [id][ply]
 int killerMoves[2][maxPly];
 
-// history moves
-int historyMoves[12][64];
+// gravity-bounded history tables. carry across moves within a game; reset
+// only on ucinewgame via clearSearchHeuristics.
+int16_t mainHistory[12][64];
+int16_t captureHistory[12][64][12];
+int16_t continuationHistory[12][64][12][64];
 
-/*
-      ================================
-            Triangular PV table
-      --------------------------------
-        PV line: e2e4 e7e5 g1f3 b8c6
-      ================================
-
-           0    1    2    3    4    5
-
-      0    m1   m2   m3   m4   m5   m6
-
-      1    0    m2   m3   m4   m5   m6
-
-      2    0    0    m3   m4   m5   m6
-
-      3    0    0    0    m4   m5   m6
-
-      4    0    0    0    0    m5   m6
-
-      5    0    0    0    0    0    m6
-*/
+// move that led to each ply. playedMoveStack[ply] is the move just made to
+// reach the position at search ply == ply. used for continuation history.
+int playedMoveStack[maxPly + 1];
 
 // PV length [ply]
 int PVLength[maxPly];
@@ -76,6 +65,90 @@ int PVTable[maxPly][maxPly];
 
 // follow PV and score PV (if follow = 1, follow pv, 0 we don't)
 int followPV, scorePV;
+
+// gravity history bound. updates self-decay toward zero as |entry| grows.
+// formula: entry += bonus - entry * |bonus| / HIST_MAX
+#define HIST_MAX 8192
+
+// move-score buckets, chosen so each tier sorts cleanly above the next
+// without colliding even after history scores are added in.
+#define SCORE_TT_BEST       10000000
+#define SCORE_PV_FOLLOW     9000000
+#define SCORE_GOOD_CAPTURE  1000000
+#define SCORE_KILLER_1      800000
+#define SCORE_KILLER_2      700000
+#define SCORE_BAD_CAPTURE   (-1000000)
+
+// reset all search-side heuristics. called at engine init and on ucinewgame.
+void clearSearchHeuristics()
+{
+    memset(killerMoves, 0, sizeof(killerMoves));
+    memset(mainHistory, 0, sizeof(mainHistory));
+    memset(captureHistory, 0, sizeof(captureHistory));
+    memset(continuationHistory, 0, sizeof(continuationHistory));
+    memset(playedMoveStack, 0, sizeof(playedMoveStack));
+}
+
+// gravity update on a 16-bit history entry, bounded to [-HIST_MAX, HIST_MAX]
+static inline void updateHistoryEntry(int16_t *entry, int bonus)
+{
+    // clamp incoming bonus so a single update cannot exceed the bound
+    if (bonus >  HIST_MAX) bonus =  HIST_MAX;
+    if (bonus < -HIST_MAX) bonus = -HIST_MAX;
+    int e = *entry;
+    e += bonus - e * abs(bonus) / HIST_MAX;
+    *entry = (int16_t)e;
+}
+
+// depth-scaled history bonus. quadratic in depth, clamped.
+static inline int historyBonus(int depth)
+{
+    int b = 16 * depth * depth + 32 * depth - 16;
+    if (b > 1200) b = 1200;
+    if (b < 0) b = 0;
+    return b;
+}
+
+// find the enemy piece captured on a move's target square. returns -1 if the
+// to-square is empty (e.g., en passant or quiet move). used to index capture
+// history. for en passant we return a pawn so capture history still indexes
+// something sensible.
+static inline int getCapturedPiece(int move)
+{
+    if (getEnpassant(move))
+        return (side == white) ? p : P;
+
+    int to = getTarget(move);
+    int startEnemy = (side == white) ? p : P;
+    int endEnemy   = (side == white) ? k : K;
+    for (int bp = startEnemy; bp <= endEnemy; bp++)
+    {
+        if (getBit(bitboards[bp], to))
+            return bp;
+    }
+    return -1;
+}
+
+// 1-ply continuation history lookup. returns 0 at the root (no previous move).
+static inline int getContHist(int currentMove)
+{
+    if (ply <= 0) return 0;
+    int prev = playedMoveStack[ply];
+    if (prev == 0) return 0;
+    return continuationHistory[getPiece(prev)][getTarget(prev)]
+                              [getPiece(currentMove)][getTarget(currentMove)];
+}
+
+// update continuation history for the current move at ply
+static inline void updateContHist(int currentMove, int bonus)
+{
+    if (ply <= 0) return;
+    int prev = playedMoveStack[ply];
+    if (prev == 0) return;
+    updateHistoryEntry(&continuationHistory[getPiece(prev)][getTarget(prev)]
+                                            [getPiece(currentMove)][getTarget(currentMove)],
+                       bonus);
+}
 
 // enable pv move scoring
 static inline void enablePVScoring(moves *moveList)
@@ -102,129 +175,152 @@ static inline void enablePVScoring(moves *moveList)
          Move ordering
     =======================
 
-    1. PV move
-    2. Captures in MVV/LVA
-    3. 1st killer move
-    4. 2nd killer move
-    5. History moves
-    6. Unsorted moves
+    1. TT best move
+    2. PV move (when following pv from prior iteration)
+    3. Good captures (SEE >= 0)
+       scored by MVV/LVA + scaled capture history
+    4. Killer move 1
+    5. Killer move 2
+    6. Quiet moves
+       scored by main history + 1-ply continuation history
+    7. Bad captures (SEE < 0)
+       scored by MVV/LVA, kept below quiets
 */
 
-// score move function (for move ordering)
+// score move function (for move ordering). does NOT include the TT best move
+// bonus; that is layered on by sortMoves.
 static inline int scoreMove(int move)
 {
-    // if pv move scoring is enabled
     if (scorePV)
     {
-        // check if we are in pv
         if (PVTable[0][ply] == move)
         {
-            // disable score flag
             scorePV = 0;
-
-            // return high for pv move so it is searched first
-            return 20000;
+            return SCORE_PV_FOLLOW;
         }
     }
 
     if (getCapture(move))
     {
-        // create target piece variable
-        int targetPiece = P;
-
-        // get range of piece bitboards depending on side
-        int startPiece, endPiece;
-
-        // if white to move, get indices for black pieces
-        if (side == white)
+        // identify the captured piece for MVV/LVA and capture history index
+        int captured;
+        if (getEnpassant(move))
+            captured = (side == white) ? p : P;
+        else
         {
-            startPiece = p;
-            endPiece = k;
-        }
-        else // for black get white piece range
-        {
-            startPiece = P;
-            endPiece = K;
-        }
-
-        // loop over enemy's bitboard and remove the bit on the target square if it exists
-        for (int bitPiece = startPiece; bitPiece <= endPiece; bitPiece++)
-        {
-            if (getBit(bitboards[bitPiece], getTarget(move)))
+            captured = (side == white) ? p : P;
+            int startEnemy = (side == white) ? p : P;
+            int endEnemy   = (side == white) ? k : K;
+            for (int bp = startEnemy; bp <= endEnemy; bp++)
             {
-                targetPiece = bitPiece;
-                // break out of loop as piece has been found
-                break;
+                if (getBit(bitboards[bp], getTarget(move)))
+                {
+                    captured = bp;
+                    break;
+                }
             }
         }
 
-        // score move using mvvlva[source][target]
-        return mvvlva[getPiece(move)][targetPiece] + 10000;
-    }
+        int mvvlvaScore = mvvlva[getPiece(move)][captured];
+        int capHist = captureHistory[getPiece(move)][getTarget(move)][captured];
 
-    //score quiet move
-    else
-    {
-        // score 1st killer move
-        if (killerMoves[0][ply] == move)
-        {
-            return 9000;
-        }
-
-        // score 2nd killer move
-        else if (killerMoves[1][ply] == move)
-        {
-            return 8000;
-        }
-
-        // score history move
+        // SEE classifies into good vs bad captures
+        if (seeGe(move, 0))
+            return SCORE_GOOD_CAPTURE + mvvlvaScore * 100 + capHist;
         else
-        {
-            return historyMoves[getPiece(move)][getTarget(move)];
-        }
+            return SCORE_BAD_CAPTURE + mvvlvaScore * 100 + capHist;
     }
 
-    return 0;
+    // quiet move
+    if (killerMoves[0][ply] == move)
+        return SCORE_KILLER_1;
+    if (killerMoves[1][ply] == move)
+        return SCORE_KILLER_2;
+
+    // history-based scoring for quiet moves
+    return mainHistory[getPiece(move)][getTarget(move)] + getContHist(move);
 }
 
-// sort moves (for better pruning)
+// sort moves (for better pruning). TT best move is bumped to top.
 static inline void sortMoves(moves *moveList, int best)
 {
-    // create move scores
-    int moveScores[moveList->count];
+    int moveScores[256];
 
-    // score all moves
     for (int count = 0; count < moveList->count; count++)
     {
-        // if hash has best move
-        if (best == moveList->moves[count])
-        {
-            // score move (for priority)
-            moveScores[count] = 30000;
-        }
+        if (best != 0 && best == moveList->moves[count])
+            moveScores[count] = SCORE_TT_BEST;
         else
-        {
-            // score move normally
             moveScores[count] = scoreMove(moveList->moves[count]);
-
-        }
     }
 
-    // loop over move in list (specialMovesFound depending on if there was a PV move)
+    // selection-style descending sort (small lists, fine; still O(n^2))
     for (int current = 0; current < moveList->count; current++)
     {
-        // loop over next move
         for (int next = current + 1; next < moveList->count; next++)
         {
-            // compare current and next move
             if (moveScores[current] < moveScores[next])
             {
-                // swap scores
                 int tempScore = moveScores[current];
                 moveScores[current] = moveScores[next];
                 moveScores[next] = tempScore;
 
-                // swap moves
+                int tempMove = moveList->moves[current];
+                moveList->moves[current] = moveList->moves[next];
+                moveList->moves[next] = tempMove;
+            }
+        }
+    }
+}
+
+// score move list using a captures-only ordering (MVV/LVA + capture history),
+// with bad SEE captures sent to the bottom. used only inside quiescence.
+static inline void sortCaptures(moves *moveList)
+{
+    int moveScores[256];
+
+    for (int count = 0; count < moveList->count; count++)
+    {
+        int move = moveList->moves[count];
+
+        int captured = (side == white) ? p : P;
+        if (getEnpassant(move))
+        {
+            captured = (side == white) ? p : P;
+        }
+        else
+        {
+            int startEnemy = (side == white) ? p : P;
+            int endEnemy   = (side == white) ? k : K;
+            for (int bp = startEnemy; bp <= endEnemy; bp++)
+            {
+                if (getBit(bitboards[bp], getTarget(move)))
+                {
+                    captured = bp;
+                    break;
+                }
+            }
+        }
+
+        int mvvlvaScore = mvvlva[getPiece(move)][captured];
+        int capHist = captureHistory[getPiece(move)][getTarget(move)][captured];
+
+        if (seeGe(move, 0))
+            moveScores[count] = SCORE_GOOD_CAPTURE + mvvlvaScore * 100 + capHist;
+        else
+            moveScores[count] = SCORE_BAD_CAPTURE + mvvlvaScore * 100 + capHist;
+    }
+
+    for (int current = 0; current < moveList->count; current++)
+    {
+        for (int next = current + 1; next < moveList->count; next++)
+        {
+            if (moveScores[current] < moveScores[next])
+            {
+                int tempScore = moveScores[current];
+                moveScores[current] = moveScores[next];
+                moveScores[next] = tempScore;
+
                 int tempMove = moveList->moves[current];
                 moveList->moves[current] = moveList->moves[next];
                 moveList->moves[next] = tempMove;
@@ -246,158 +342,135 @@ void printMoveScores(moves *moveList)
 // repetition detection
 static inline int isRepetition()
 {
-    // loop over repetition index range
     for (int index = 0; index < repetitionIndex; index++)
     {
         if (repetitionTable[index] == hashKey)
-        {
             return 1;
-        }
     }
-
-    // if no repetition
     return 0;
 }
 
-// quiescence search (to stop the horizon effect)
+// quiescence search (to stop the horizon effect).
+// uses captures-only movegen, MVV/LVA + SEE ordering, and skips losing
+// captures (SEE < 0) below the stand-pat.
 static inline int quiescence(int alpha, int beta)
 {
-    // every 2047 nodes check for user input
     if ((nodes & 2047) == 0)
-    {
-        // listen to GUI or user input
         communicate();
-    }
 
-    // add nodes
     nodes++;
 
-    // drop search if max ply
     if (ply > maxPly - 1)
-    {
-        // just evaluate position
         return evaluate();
-    }
 
-    // evaluate position
     int eval = evaluate();
 
-    // fail-hard beta cutoff (score can't go outside of alpha beta bounds)
+    // stand-pat
     if (eval >= beta)
-    {
-        // node fails high
         return beta;
-    }
-
-    // if found a better move
     if (eval > alpha)
-    {
-        // PV (principal variation) node
         alpha = eval;
-    }
 
-    // create moves list
     moves moveList[1];
+    generateCaptures(moveList);
+    sortCaptures(moveList);
 
-    // gen moves
-    generateMoves(moveList);
-
-    // sort moves mvvlva
-    sortMoves(moveList, 0);
-
-    // loop over moves
     for (int count = 0; count < moveList->count; count++)
     {
-        // copy the board
+        int move = moveList->moves[count];
+
+        // SEE pruning: drop captures the static exchange says are losing.
+        // promotions/en passant pass through (seeGe returns true at thr=0).
+        if (!seeGe(move, 0))
+            continue;
+
         copyBoard();
 
-        // increment ply
         ply++;
-
-        // increment repetition & store hash
         repetitionIndex++;
         repetitionTable[repetitionIndex] = hashKey;
 
-        // only make legal moves
-        if (makeMove(moveList->moves[count], capturesOnly) == 0)
+        if (makeMove(move, allMoves) == 0)
         {
-            // decrease ply
             ply--;
-
-            // decrease repetition & store hash
             repetitionIndex--;
-
-            // skip
             continue;
         }
 
-        // score the move
+        playedMoveStack[ply] = move;
+
         int score = -quiescence(-beta, -alpha);
 
-        // decrease ply
         ply--;
-
-        // decrease repetition & store hash
         repetitionIndex--;
 
-        // undo move
         undoBoard();
 
-        // return 0 if time is up
         if (stopped == 1)
-        {
             return 0;
-        }
 
-        // if found a better move
         if (score > alpha)
         {
-            // PV (principal variation) node
             alpha = score;
-
-            // fail-hard beta cutoff (score can't go outside of alpha beta bounds)
             if (score >= beta)
-            {
-                // node fails high
                 return beta;
-            }
         }
     }
-    // node fails low
+
     return alpha;
 }
 
 extern const int fullDepthMoves = 5;
 extern const int reductionLimit = 2;
 
+// contempt in centipawns. positive means both sides slightly prefer to play
+// on rather than draw. the draw is scored as -DRAW_CONTEMPT from the side-to-
+// move's perspective, so any continuation worth more than -DRAW_CONTEMPT
+// (which includes nearly all positions where we are not already losing
+// significantly) is preferred to the draw. when actually losing, the engine
+// still takes the draw (since the draw score -10 beats e.g. a -300 line).
+#define DRAW_CONTEMPT 30
+
 // negamax alpha beta search
 static inline int negamax(int alpha, int beta, int depth)
 {
-    // create PV length
     PVLength[ply] = ply;
 
-    // create move variable
-    // (the inner-loop redeclares "move" with the same name, so this outer
-    //  one must be initialised for the final recordHash call below)
-    int move = 0, score = 0;
-
-    // best move
+    int score = 0;
     int bestMove = 0;
-
-    // get hash flag (initially as alpha flag)
     int hashFlag = hashFlagAlpha;
 
-    // if position repetition occurs
-    // (both checks are gated on ply, otherwise the root can return draw
-    //  without producing a bestmove)
+    int pvNode = beta - alpha > 1;
+
+    // repetition / fifty-move draws (gated on ply so root always returns a move).
+    // instead of a plain return 0, we return a contempt-adjusted draw score so
+    // both sides prefer to keep playing in slightly favourable positions.
     if (ply && (isRepetition() || fifty >= 100))
-        // return draw score
-        return 0;
+    {
+        int drawScore = -DRAW_CONTEMPT;
+
+        if (!pvNode)
+        {
+            // in non-pv nodes we can fail-cutoff against the draw score
+            if (drawScore <= alpha) return alpha;
+            if (drawScore >= beta)  return beta;
+            // otherwise tighten alpha but keep searching (rare path; depth
+            // was zero at the recurse so the search returns from the leaf
+            // before any further moves anyway)
+            alpha = drawScore;
+        }
+        else
+        {
+            // in pv nodes only tighten alpha if the draw improves on it
+            if (drawScore > alpha)
+            {
+                alpha = drawScore;
+                if (alpha >= beta) return beta;
+            }
+        }
+    }
 
     // mate distance pruning
-    // if we already found a mate, don't search for a slower one
-    // alpha bound: at this ply, the worst we can return is being mated now
-    // beta bound: at this ply, the best we can return is mating in 1 ply
     if (ply)
     {
         if (alpha < -mateValue + ply) alpha = -mateValue + ply;
@@ -405,434 +478,353 @@ static inline int negamax(int alpha, int beta, int depth)
         if (alpha >= beta) return alpha;
     }
 
-    // check if pv node
-    int pvNode = beta - alpha > 1;
-
-    // always probe the tt so bestMove is populated for move ordering
-    // (the previous form short-circuited on ply == 0 and skipped the probe at root)
-    // only return the stored score for non-root, non-pv nodes
+    // always probe TT so bestMove gets populated for move ordering
     score = probeHash(alpha, beta, depth, &bestMove);
     if (ply && pvNode == 0 && score != noHashEntry)
-    {
-        // return score of the move without search
         return score;
-    }
 
-    // check for input from gui or user every 2047 nodes
     if ((nodes & 2047) == 0)
-    {
-        // listen to inputs
         communicate();
-    }
 
-    // recursion escape
     if (depth == 0)
-    {
-        // run quiescence search
         return quiescence(alpha, beta);
-    }
 
-    // drop search if max ply
     if (ply > maxPly - 1)
-    {
-        // just evaluate position
         return evaluate();
-    }
 
-    // increment nodes
     nodes++;
 
-    // incheck?
     int inCheck = isUnderAttack((side == white) ? getLSFBIndex(bitboards[K]) :
                                                         getLSFBIndex(bitboards[k]),
                                                         side ^ 1);
 
-
-
-    // if in check, increase depth
     if (inCheck)
-    {
         depth++;
-    }
 
-    // legal moves counter
     int legalMoves = 0;
-
-    // get static eval
     int eval = evaluate();
 
-    /*
-        skips moves if material balance plus gain of the move and safety margin
-        does not improve alpha
-    */
-    // reverse futility pruning (RFP or static null move pruning)
-    // do not prune in mate territory, otherwise we can prune away a mate
-    // (the previous guard "abs(beta - 1) > -infinity + 100" was always true
-    //  since abs is non-negative and -infinity + 100 is negative)
+    // reverse futility pruning
 	if (depth < 3 && !pvNode && !inCheck && abs(beta) < mateScore)
 	{
-        // define evaluation margin
 		int evalMargin = 120 * depth;
-
-		// evaluation margin substracted from static evaluation score fails high
 		if (eval - evalMargin >= beta)
-		    // evaluation margin substracted from static evaluation score
 			return eval - evalMargin;
 	}
 
     // null move pruning
     if (depth >= 3 && inCheck == 0 && ply)
     {
-        // copy board
         copyBoard();
 
-        // increment ply to sync
         ply++;
-
-        // increment repetition & store hash
         repetitionIndex++;
         repetitionTable[repetitionIndex] = hashKey;
 
-        // update hash key
         if (enpassant != noSq)
-        {
             hashKey ^= enpassantKeys[enpassant];
-        }
-
-        // reset enpassant square
         enpassant = noSq;
 
-        // switch the side to give opponent a second move
         side ^= 1;
-
-        // hash the side
         hashKey ^= sideKey;
 
-        // search with less depth (depth - 1 - R, R=2)
+        // null move advances ply; record a null prev-move so continuation
+        // history does not get fed garbage on the next ply
+        playedMoveStack[ply] = 0;
+
         score = -negamax(-beta, -beta + 1, depth - 1 - 2);
 
-        // bring back sync
         ply--;
-
-        // decrease repetition & store hash
         repetitionIndex--;
 
-        // restore board and variables
         undoBoard();
 
-        // return 0 if time is up
         if (stopped == 1)
-        {
             return 0;
-        }
 
-        // check fail hard beta cutoff
         if (score >= beta)
-        {
-            // node fails high
             return beta;
-        }
     }
 
-    /*
-        If the static evaluation indicates a fail-low node, but q-search fails high,
-        the score of the reduced fail-high search is returned, since there was obviously
-        a winning capture raising the score
-        from: https://www.chessprogramming.org/Razoring
-    */
-    // razoring (same idea as implemented in Strelka)
+    // razoring (Strelka-style)
     if (!pvNode && !inCheck && depth <= 3)
     {
-        // get static eval and add bonus
         score = eval + 125;
-
-        // get new score
         int newScore;
 
-        // static evaluation indicates a fail-low node
         if (score < beta)
         {
-            // on depth 1
             if (depth == 1)
             {
-                // get quiscence score
                 newScore = quiescence(alpha, beta);
-
-                // return quiescence score if it's greater then static evaluation score
                 return (newScore > score) ? newScore : score;
             }
 
-            // add second bonus to static evaluation
             score += 175;
 
-            // static evaluation indicates a fail-low node
             if (score < beta && depth <= 2)
             {
-                // get quiscence score
                 newScore = quiescence(alpha, beta);
-
-                // quiescence score indicates fail-low node
                 if (newScore < beta)
-                    // return quiescence score if it's greater then static evaluation score
                     return (newScore > score) ? newScore : score;
             }
         }
 	}
 
-    // create moves list
     moves moveList[1];
-
-    // gen moves
     generateMoves(moveList);
 
-    // if we are following pv line
     if (followPV)
-    {
-        // enable pv score
         enablePVScoring(moveList);
-    }
 
-    // sort moves mvvlva
     sortMoves(moveList, bestMove);
 
-    // number of moves searched
     int movesSearched = 0;
 
-    // loop over moves
+    // remember the quiets and captures we tried so we can apply malus on cutoff
+    int quietsTried[256];
+    int quietsCount = 0;
+    int capturesTried[256];
+    int capturesCount = 0;
+
     for (int count = 0; count < moveList->count; count++)
     {
         int move = moveList->moves[count];
 
-        // copy the board
         copyBoard();
 
-        // increment ply
         ply++;
-
-        // increment repetition & store hash
         repetitionIndex++;
         repetitionTable[repetitionIndex] = hashKey;
 
-        // only make legal moves
         if (makeMove(moveList->moves[count], allMoves) == 0)
         {
-            // decrease ply
             ply--;
-
-            // decrease repetition & store hash
             repetitionIndex--;
-
-            // skip
             continue;
         }
 
-        // add legal move
+        playedMoveStack[ply] = move;
+
         legalMoves++;
 
-        // opponent in check flag (for lmr)
         int opponentInCheck = isUnderAttack((side == white) ? getLSFBIndex(bitboards[K]) :
                                                         getLSFBIndex(bitboards[k]),
                                                         side ^ 1);
 
-
-        // if no moves searched
         if (movesSearched == 0)
         {
-            // do a normal search
-            score = -negamax(-beta, -alpha, depth -1);
+            score = -negamax(-beta, -alpha, depth - 1);
         }
         else
         {
-            // condition to initiate late move reductions
             if (movesSearched >= fullDepthMoves &&
                         depth >= reductionLimit &&
                         inCheck == 0 && pvNode == 0)
             {
-                // if move is promotion or capture,
                 if (getPromoted(move) || getCapture(move))
                 {
-                    // if moves give check, search w reduced depth of 2
                     if (opponentInCheck)
-                    {
                         score = -negamax(-alpha - 1, -alpha, depth - 1 - 2);
-                    }
-                    else // if move does not give check, reduce depth by 3
-                    {
+                    else
                         score = -negamax(-alpha - 1, -alpha, depth - 1 - 3);
-                    }
                 }
-                else // quiet move
+                else
                 {
-
-                    // search this move with reduced depth
-                    // movesSearched is the count of legal moves already searched at this node,
-                    // which is what the Ethereal formula expects, not the game's halfmove counter
+                    // Ethereal-style LMR formula
                     double depthAdjustment = 0.7844 + std::log(depth) * std::log(movesSearched) / 2.4696;
-                    // Ensure the resulting depth is an integer and not less than 1 (values taken from Ethereal)
                     int adjustedDepth = static_cast<int>(std::max(1.0, depth - 1 - depthAdjustment));
                     score = -negamax(-alpha - 1, -alpha, adjustedDepth);
-
                 }
             }
-            else // ensure full-depth search
+            else
             {
                 score = alpha + 1;
             }
-            // PVS (principal variation search)
+
+            // PVS re-search
             if (score > alpha)
             {
-                // once you find a move with a score between alpha and beta
-                // search for the rest of the moves trying to prove they are bad
-                // this is faster than searching thinking the other moves are good
-                score = -negamax(-alpha - 1, - alpha, depth - 1);
+                score = -negamax(-alpha - 1, -alpha, depth - 1);
 
-                // if it finds out it is wrong (there is a better move)
-                // you have to search with normal alpha beta again
-                // this is a waste of time but happens not that often so overall it's worth it
                 if ((score > alpha) && (score < beta))
-                {
-                    // search normally again if move happened to be better than pv
-                    score = -negamax(-beta, -alpha, depth-1);
-                }
+                    score = -negamax(-beta, -alpha, depth - 1);
             }
         }
 
-        // decrease ply
         ply--;
-
-        // decrease repetition & store hash
         repetitionIndex--;
 
-        // undo move
         undoBoard();
 
-        // return 0 if time is up
         if (stopped == 1)
-        {
             return 0;
+
+        // bookkeep the move for cutoff bonus/malus
+        if (getCapture(move))
+        {
+            if (capturesCount < 256) capturesTried[capturesCount++] = move;
+        }
+        else
+        {
+            if (quietsCount < 256) quietsTried[quietsCount++] = move;
         }
 
-        // add move searched
         movesSearched++;
 
-        // if found a better move
         if (score > alpha)
         {
-            // switch hash flag to pv node
             hashFlag = hashFlagExact;
+            bestMove = move;
 
-            // store best move
-            bestMove = moveList->moves[count];
-
-            // only store history moves on quiet moves
-            if (getCapture(moveList->moves[count]) == 0)
-            {
-                // store history moves
-                historyMoves[getPiece(moveList->moves[count])][getTarget(moveList->moves[count])] += depth;
-            }
-            // PV (principal variation) node
             alpha = score;
 
-            // write PV move
-            PVTable[ply][ply] = moveList->moves[count];
-
-            // loop over next ply
+            PVTable[ply][ply] = move;
             for (int nextPly = ply + 1; nextPly < PVLength[ply + 1]; nextPly++)
-            {
-                // copy move from deeper ply and add to current ply's line
                 PVTable[ply][nextPly] = PVTable[ply + 1][nextPly];
-            }
-
-            // update PV length
             PVLength[ply] = PVLength[ply + 1];
 
-            // fail-hard beta cutoff (score can't go outside of alpha beta bounds)
             if (score >= beta)
             {
-                // store hash with beta flag and beta value
-                recordHash(beta, depth, hashFlagBeta, moveList->moves[count], bestMove);
+                recordHash(beta, depth, hashFlagBeta, move, bestMove);
 
-                // on quiet moves
-                if (getCapture(moveList->moves[count]) == 0)
+                int bonus = historyBonus(depth);
+
+                if (getCapture(move))
                 {
-                    // store killer moves
-                    killerMoves[1][ply] = killerMoves[0][ply];
-                    killerMoves[0][ply] = moveList->moves[count];
+                    // capture cutoff: bonus to its capture history, malus to
+                    // earlier non-best captures
+                    int captured = getCapturedPiece(move);
+                    if (captured >= 0)
+                        updateHistoryEntry(&captureHistory[getPiece(move)][getTarget(move)][captured], bonus);
+
+                    for (int i = 0; i < capturesCount - 1; i++)
+                    {
+                        int badMove = capturesTried[i];
+                        int badCap = getCapturedPiece(badMove);
+                        if (badCap >= 0)
+                            updateHistoryEntry(&captureHistory[getPiece(badMove)][getTarget(badMove)][badCap], -bonus);
+                    }
+                }
+                else
+                {
+                    // quiet cutoff: store killer, bonus to main + continuation
+                    // history, malus to earlier non-best quiets
+                    if (killerMoves[0][ply] != move)
+                    {
+                        killerMoves[1][ply] = killerMoves[0][ply];
+                        killerMoves[0][ply] = move;
+                    }
+
+                    updateHistoryEntry(&mainHistory[getPiece(move)][getTarget(move)], bonus);
+                    updateContHist(move, bonus);
+
+                    for (int i = 0; i < quietsCount - 1; i++)
+                    {
+                        int badMove = quietsTried[i];
+                        updateHistoryEntry(&mainHistory[getPiece(badMove)][getTarget(badMove)], -bonus);
+                        updateContHist(badMove, -bonus);
+                    }
                 }
 
-                // node fails high
                 return beta;
             }
         }
     }
 
-    // no legal moves currently
+    // checkmate / stalemate
     if (legalMoves == 0)
     {
-        // king in check (chekmate)
         if (inCheck)
-        {
-            // return mating score (+ ply to find checkmates when using larger depths)
             return -mateValue + ply;
-        }
-        // king not in check (stalemate)
         else
-        {
-            // return stalemate score
             return 0;
-        }
     }
 
-    // store hash with alpha flag and alpha scoreb
-    recordHash(alpha, depth, hashFlag, move, bestMove);
+    recordHash(alpha, depth, hashFlag, bestMove, bestMove);
 
-    // node fails low
     return alpha;
 }
 
 // search position
 void search(int depth)
 {
-    // create score
     int score = 0;
 
-    // reset node counter
     nodes = 0;
-
-    // reset no more time flag
     stopped = 0;
 
-    // reset pv follow and pv scores
     followPV = 0;
     scorePV = 0;
 
-    // clear helper data structures for search
+    // killers and PV are ply-indexed; reset per-search. histories persist
+    // across moves and are only cleared on ucinewgame.
     memset(killerMoves, 0, sizeof(killerMoves));
-    memset(historyMoves, 0, sizeof(historyMoves));
     memset(PVTable, 0, sizeof(PVTable));
     memset(PVLength, 0, sizeof(PVLength));
+    memset(playedMoveStack, 0, sizeof(playedMoveStack));
 
-    // give initial alpha and beta values
+    // single-legal-move fast path. if there is only one legal reply, play it
+    // immediately without searching. saves clock time in forced positions.
+    {
+        moves probe[1];
+        generateMoves(probe);
+
+        int legalCount = 0;
+        int onlyLegal = 0;
+        for (int i = 0; i < probe->count; i++)
+        {
+            int mv = probe->moves[i];
+            copyBoard();
+            if (makeMove(mv, allMoves))
+            {
+                undoBoard();
+                legalCount++;
+                onlyLegal = mv;
+                if (legalCount > 1) break;
+            }
+        }
+
+        if (legalCount == 1)
+        {
+            printf("info string only one legal move\n");
+            printf("bestmove ");
+            printMove(onlyLegal);
+            printf("\n");
+            return;
+        }
+    }
+
     int alpha = -infinity;
     int beta = infinity;
 
-    // iterative deepening
     for (int currentDepth = 1; currentDepth <= depth; currentDepth++)
     {
-        // no more time
         if (stopped == 1)
+            break;
+
+        // iterative deepening time check. if we have used roughly half of
+        // softLimit already, do not start a new iteration. iterations
+        // typically take roughly twice as long as the previous one, so
+        // crossing this threshold means the next iteration is unlikely to
+        // finish within stoptime and we would just abort partway through.
+        if (timeset && currentDepth > 1 && softLimit > 0 &&
+            (getTime() - starttime) * 2 > softLimit)
         {
-            // stop calculating
             break;
         }
 
-        // activate follow pv flag
         followPV = 1;
 
-        // find best move
         score = negamax(alpha, beta, currentDepth);
 
-        // we are outside of the window so we try again with a full window
+        // if search was aborted, do not retry aspiration or print
+        // partial info; just bail out so the previous iteration's PV
+        // stands as the bestmove.
+        if (stopped == 1)
+            break;
+
+        // aspiration window fail -> retry full window
         if ((score <= alpha) || (score >= beta))
         {
             alpha = -infinity;
@@ -840,41 +832,27 @@ void search(int depth)
             continue;
         }
 
-        // decrease window for next node
         alpha = score - 50;
         beta = score + 50;
-
-        // print score/mate info
-        // if pv length is not 0
 
         if (PVLength[0])
         {
             if (score > mateScore || score < -mateScore)
-            {
                 printf("info score mate %d ", (score > 0) ? ((mateValue-score)/2+1) : (-mateValue+(mateValue-score)/2));
-            }
             else
-            {
                 printf("info score cp %d ", score);
-            }
 
-            // print depth, nodes, pv info
             printf("depth %d nodes %lld pv ", currentDepth, nodes);
 
-            // loop over moves in pv line
             for (int count = 0; count < PVLength[0]; count++)
             {
-                // print move (PVTable[0] has the principle variation)
                 printMove(PVTable[0][count]);
                 printf(" ");
             }
             printf("\n");
         }
-
     }
 
-
-    // best move placeholder
     printf("bestmove ");
     printMove(PVTable[0][0]);
     printf("\n");

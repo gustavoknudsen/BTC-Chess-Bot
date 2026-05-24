@@ -35,6 +35,7 @@ SRCS := \
     $(SRC_DIR)/position.cpp \
     $(SRC_DIR)/random.cpp \
     $(SRC_DIR)/search.cpp \
+    $(SRC_DIR)/see.cpp \
     $(SRC_DIR)/timeman.cpp \
     $(SRC_DIR)/tt.cpp \
     $(SRC_DIR)/uci.cpp \
@@ -85,4 +86,5 @@ test: $(PERFT)
 
 clean:
 	-rm -f $(ENGINE) $(ENGINE_DEBUG) $(PERFT)
+	-rm -f engine43.exe engine52.exe
 	-rm -f perft_out.txt
