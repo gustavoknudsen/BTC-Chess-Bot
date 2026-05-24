@@ -1,0 +1,36 @@
+# build outputs
+*.exe
+*.obj
+*.o
+*.exp
+*.lib
+*.a
+*.gcda
+*.gcno
+
+# perft / test artifacts written by the Makefile
+perft_*.txt
+baseline_*.txt
+refactored_*.txt
+
+# editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# os junk
+.DS_Store
+Thumbs.db
+
+# claude code session files
+.claude/
+
+# reference material kept locally only
+.stockfish_src/
+
+# uci client side files
+*.uci_options
+
+# misc
+*.log
