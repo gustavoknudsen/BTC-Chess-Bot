@@ -13,7 +13,7 @@
  - Aggressive & Entertaining Chess
  - Created by Gustavo Knudsen
  - UCI Protocol Chess Engine
- - Current Version: 2.3
+ - Current Version: 2.4
  - Is, In Fact, Better Than Cris
 ## Strength
 **Version 2.3**
@@ -46,6 +46,7 @@
  - Reverse Futility Pruning (RFP) / Static Null Move Pruning
  - Razoring
  - Late Move Reductions (LMR)
+ - Mate Distance Pruning
  - History Moves
  - Killer Moves
  - Transposition Table w/ Zobrist Hashing
@@ -87,6 +88,31 @@
  - If online, can be played on  [Lichess](https://lichess.org/@/BetterThanCris) 
  - Can also be downloaded and ran like a normal UCI engine locally on a GUI
 ## Releases
+**Version 2.4 - 24/05/2026**
+- Refactored Engine Into Modular `src/` Layout
+- Added Mate Distance Pruning
+- Fixed Critical Search Bugs:
+	- LMR Was Using Game Halfmove Counter Instead of Move Index
+	- Transposition Table No Longer Wiped Between Searches
+	- RFP Mate-Space Guard (Was Always True, Could Prune Mates)
+	- Root Now Probes TT for Move Ordering
+	- Draw Check Precedence at Root
+- Fixed Critical Evaluation Bugs:
+	- Mobility Bonus Out-of-Bounds Read in Middlegame
+	- Bishop and Knight Attack Table Indexing for Black
+	- Black King Pawn-Storm Penalty (Was Reading Own Pawns)
+	- Static Initialisation of Center File and Outpost Rank Masks
+	- Position Cache Hash Truncation
+- Removed Fifty-Move Counter Eval Scaling (Caused TT Inconsistency)
+- Improved Time Management:
+	- Formulas Now Use Move Number Instead of Search Ply
+	- Hard Cap at Maximum Time
+	- Clamped Low-Clock Emergency Stop
+- Fixed UCI Handling:
+	- `stop` Command Now Halts Search Instead of Quitting Engine
+	- `parsePosition` Handles Arbitrary Whitespace Between Moves
+- Centralised Version Tracking in `version.h`
+
 **Version 2.3 - 25/09/2024**
 - Added Mobility w/ X-Rays to Evaluation
 - Improved King Evaluation by Adding:
