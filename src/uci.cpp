@@ -342,9 +342,11 @@ void parseGo(const char *command)
 // UCI loop for communication
 void uciLoop()
 {
-    // init max hash size and default mb
+    // init max hash size and default mb. mb must mirror the initial call
+    // to initTT() in initAll() so the advertised default in the uci handshake
+    // matches what the engine is actually running with.
     int maxHash = 128;
-    int mb = 64;
+    int mb = 12;
 
     // reset STDIN and STDOUT buffers
     setbuf(stdin, NULL);
@@ -424,12 +426,22 @@ void uciLoop()
         // check uci command
         else if (strncmp(input, "uci", 3) == 0)
         {
-            // print info (name, version, author all live in version.h)
+            // print info (name, version, author all live in version.h).
             printf("id name %s %s\n", ENGINE_NAME, ENGINE_VERSION);
             printf("id author %s\n", ENGINE_AUTHOR);
             printf("uciok\n");
-            printf("option name Move Overhead type spin default 10 min 0 max 5000\n");
 
+            // advertise the standard options we actually handle. defaults
+            // match the source-side initialisers so a GUI honouring the
+            // advertised default does not silently disagree with the engine.
+            printf("option name Hash type spin default %d min 4 max %d\n", mb, maxHash);
+            printf("option name Move Overhead type spin default %d min 0 max 5000\n", moveOverhead);
+
+            // about-string is displayed in engine info panels in Arena,
+            // Banksia and similar; gives the user a URL to the repo and
+            // a one-line summary of the engine.
+            printf("option name UCI_EngineAbout type string default %s %s by %s - https://github.com/gustavoknudsen/BTC-Chess-Bot\n",
+                   ENGINE_NAME, ENGINE_VERSION, ENGINE_AUTHOR);
 
             fflush(stdout);
         }

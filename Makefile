@@ -2,16 +2,24 @@
 #
 # Targets:
 #   make            - same as `make build`
-#   make build      - build the optimised engine (engine.exe)
-#   make debug      - build with -O0 -g (engine_debug.exe)
+#   make build      - build the optimised engine (btc<version>.exe)
+#   make debug      - build with -O0 -g (btc<version>_debug.exe)
 #   make perft      - build the perft test driver (test_perft.exe)
 #   make test       - run perft on a few positions and check the totals
 #                     against the canonical node counts
 #   make clean      - remove all build artefacts
+#
+# Binary name is derived from ENGINE_VERSION in src/version.h, so a bump
+# there changes the build target without touching the Makefile. e.g.
+# ENGINE_VERSION "2.6" produces btc26.exe.
 
 CXX        := g++
 CXXFLAGS   := -O2 -Wno-unused-result
 DEBUGFLAGS := -O0 -g -Wno-unused-result
+
+# Extract version string from version.h and strip the dot so 2.6 -> 26.
+ENGINE_VERSION_STR := $(shell sed -n 's/.*ENGINE_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' src/version.h)
+ENGINE_VERSION_TAG := $(subst .,,$(ENGINE_VERSION_STR))
 
 # On MSYS2 / Git Bash on Windows, g++ may fail to create a tempdir if TMP
 # inherits an unwritable Windows path. Force a known-good location.
@@ -47,8 +55,8 @@ SRCS_NO_MAIN := $(filter-out $(SRC_DIR)/main.cpp,$(SRCS))
 # Header files, so header edits trigger a rebuild
 HDRS := $(wildcard $(SRC_DIR)/*.h)
 
-ENGINE        := engine.exe
-ENGINE_DEBUG  := engine_debug.exe
+ENGINE        := btc$(ENGINE_VERSION_TAG).exe
+ENGINE_DEBUG  := btc$(ENGINE_VERSION_TAG)_debug.exe
 PERFT         := test_perft.exe
 
 .PHONY: all build debug perft test clean
@@ -86,6 +94,7 @@ test: $(PERFT)
 
 clean:
 	-rm -f $(ENGINE) $(ENGINE_DEBUG) $(PERFT)
+	-rm -f engine.exe engine_debug.exe
 	-rm -f engine_current.exe engine_no_contempt.exe engine_old_time.exe engine_baseline.exe
 	-rm -f engine43.exe engine52.exe
 	-rm -f perft_out.txt
