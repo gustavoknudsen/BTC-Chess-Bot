@@ -27,7 +27,7 @@ Thumbs.db
 .claude/
 
 # reference material kept locally only
-.stockfish_src/
+.stockfish*/
 
 # internal development context (handover for new chat sessions)
 HANDOVER.md
