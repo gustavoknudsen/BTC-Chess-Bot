@@ -35,8 +35,9 @@ void initAll()
     // init random keys (for hashing)
     initRandomKeys();
 
-    // init transposition table with 12MB
-    initTT(12);
+    // init transposition table with 128MB (matches the advertised default
+    // in uci.cpp; bump both together if you change it)
+    initTT(128);
 
     /*
     init magic numbers (naturally not on but can be used as well if

@@ -342,11 +342,10 @@ void parseGo(const char *command)
 // UCI loop for communication
 void uciLoop()
 {
-    // init max hash size and default mb. mb must mirror the initial call
-    // to initTT() in initAll() so the advertised default in the uci handshake
-    // matches what the engine is actually running with.
-    int maxHash = 128;
-    int mb = 12;
+    // mb must mirror initTT() in initAll() so the advertised default in the
+    // uci handshake matches what the engine is actually running with.
+    int maxHash = 4096;
+    int mb = 128;
 
     // reset STDIN and STDOUT buffers
     setbuf(stdin, NULL);
