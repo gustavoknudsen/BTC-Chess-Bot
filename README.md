@@ -148,7 +148,7 @@
 - Replaced Bubble/Selection Sort with Insertion Sort in Move Ordering:
 	- Stable Tie-Breaking and Lower Per-Sort Cost on Near-Sorted Lists
 	- Effect: 60% Score Over the Pre-Sort 2.6 Build, Top of a 3-Way Round-Robin
-- Tried and Reverted (Both Lost in 3-Way Round-Robin vs Sort-Only):
+- Tried and Reverted (Can Revisit):
 	- Improving Heuristic (Stockfish-Style LMP/Futility/LMR Gates by `eval[ply] > eval[ply-2]`)
 		- 45.5% Score; LMP Threshold Halving on Not-Improving Too Aggressive for Our Eval Signal
 	- Best-Move Stability + Fail-Low Time Adjustment
