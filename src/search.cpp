@@ -254,22 +254,22 @@ static inline void sortMoves(moves *moveList, int best)
             moveScores[count] = scoreMove(moveList->moves[count]);
     }
 
-    // selection-style descending sort (small lists, fine; still O(n^2))
-    for (int current = 0; current < moveList->count; current++)
+    // insertion sort (descending). adaptive on near-sorted input, which is
+    // the common case once history and killers have warmed up. linear in N
+    // when the list is already sorted; quadratic worst case.
+    for (int i = 1; i < moveList->count; i++)
     {
-        for (int next = current + 1; next < moveList->count; next++)
+        int curScore = moveScores[i];
+        int curMove  = moveList->moves[i];
+        int j = i - 1;
+        while (j >= 0 && moveScores[j] < curScore)
         {
-            if (moveScores[current] < moveScores[next])
-            {
-                int tempScore = moveScores[current];
-                moveScores[current] = moveScores[next];
-                moveScores[next] = tempScore;
-
-                int tempMove = moveList->moves[current];
-                moveList->moves[current] = moveList->moves[next];
-                moveList->moves[next] = tempMove;
-            }
+            moveScores[j + 1]      = moveScores[j];
+            moveList->moves[j + 1] = moveList->moves[j];
+            j--;
         }
+        moveScores[j + 1]      = curScore;
+        moveList->moves[j + 1] = curMove;
     }
 }
 
@@ -311,21 +311,20 @@ static inline void sortCaptures(moves *moveList)
             moveScores[count] = SCORE_BAD_CAPTURE + mvvlvaScore * 100 + capHist;
     }
 
-    for (int current = 0; current < moveList->count; current++)
+    // insertion sort (descending) as in sortMoves
+    for (int i = 1; i < moveList->count; i++)
     {
-        for (int next = current + 1; next < moveList->count; next++)
+        int curScore = moveScores[i];
+        int curMove  = moveList->moves[i];
+        int j = i - 1;
+        while (j >= 0 && moveScores[j] < curScore)
         {
-            if (moveScores[current] < moveScores[next])
-            {
-                int tempScore = moveScores[current];
-                moveScores[current] = moveScores[next];
-                moveScores[next] = tempScore;
-
-                int tempMove = moveList->moves[current];
-                moveList->moves[current] = moveList->moves[next];
-                moveList->moves[next] = tempMove;
-            }
+            moveScores[j + 1]      = moveScores[j];
+            moveList->moves[j + 1] = moveList->moves[j];
+            j--;
         }
+        moveScores[j + 1]      = curScore;
+        moveList->moves[j + 1] = curMove;
     }
 }
 
@@ -423,13 +422,6 @@ static inline int quiescence(int alpha, int beta)
 extern const int fullDepthMoves = 5;
 extern const int reductionLimit = 2;
 
-// contempt in centipawns. positive means both sides slightly prefer to play
-// on rather than draw. the draw is scored as -DRAW_CONTEMPT from the side-to-
-// move's perspective, so any continuation worth more than -DRAW_CONTEMPT
-// (which includes nearly all positions where we are not already losing
-// significantly) is preferred to the draw. when actually losing, the engine
-// still takes the draw (since the draw score -10 beats e.g. a -300 line).
-#define DRAW_CONTEMPT 30
 
 // negamax alpha beta search
 static inline int negamax(int alpha, int beta, int depth)
@@ -442,33 +434,9 @@ static inline int negamax(int alpha, int beta, int depth)
 
     int pvNode = beta - alpha > 1;
 
-    // repetition / fifty-move draws (gated on ply so root always returns a move).
-    // instead of a plain return 0, we return a contempt-adjusted draw score so
-    // both sides prefer to keep playing in slightly favourable positions.
+    // repetition / fifty-move draws (gated on ply so root always returns a move)
     if (ply && (isRepetition() || fifty >= 100))
-    {
-        int drawScore = -DRAW_CONTEMPT;
-
-        if (!pvNode)
-        {
-            // in non-pv nodes we can fail-cutoff against the draw score
-            if (drawScore <= alpha) return alpha;
-            if (drawScore >= beta)  return beta;
-            // otherwise tighten alpha but keep searching (rare path; depth
-            // was zero at the recurse so the search returns from the leaf
-            // before any further moves anyway)
-            alpha = drawScore;
-        }
-        else
-        {
-            // in pv nodes only tighten alpha if the draw improves on it
-            if (drawScore > alpha)
-            {
-                alpha = drawScore;
-                if (alpha >= beta) return beta;
-            }
-        }
-    }
+        return 0;
 
     // mate distance pruning
     if (ply)
@@ -612,6 +580,38 @@ static inline int negamax(int alpha, int beta, int depth)
                                                         getLSFBIndex(bitboards[k]),
                                                         side ^ 1);
 
+        // LMP and frontier futility on quiet moves.
+        // we only prune at non-pv, non-check nodes once at least one move
+        // has been searched (so we have a real alpha baseline), and only on
+        // quiet moves that do not give check. mate-territory alpha disables
+        // both since we never want to drop a saving sequence in mate space.
+        if (movesSearched > 0 && !pvNode && !inCheck && !opponentInCheck
+            && !getCapture(move) && !getPromoted(move)
+            && abs(alpha) < mateScore)
+        {
+            // LMP: at shallow depths, drop quiet moves after we have searched
+            // enough of them. lmpThreshold grows with depth so we are more
+            // permissive deeper in the tree.
+            if (depth <= 8 && movesSearched >= 3 + depth * depth)
+            {
+                ply--;
+                repetitionIndex--;
+                undoBoard();
+                continue;
+            }
+
+            // frontier futility: if the static eval is so far below alpha
+            // that even a depth-scaled margin cannot bridge the gap, skip
+            // this quiet move.
+            if (depth <= 6 && eval + 120 * depth <= alpha)
+            {
+                ply--;
+                repetitionIndex--;
+                undoBoard();
+                continue;
+            }
+        }
+
         if (movesSearched == 0)
         {
             score = -negamax(-beta, -alpha, depth - 1);
@@ -624,16 +624,37 @@ static inline int negamax(int alpha, int beta, int depth)
             {
                 if (getPromoted(move) || getCapture(move))
                 {
-                    if (opponentInCheck)
-                        score = -negamax(-alpha - 1, -alpha, depth - 1 - 2);
-                    else
-                        score = -negamax(-alpha - 1, -alpha, depth - 1 - 3);
+                    // captures and promos: small static reduction. check-givers
+                    // get the lighter (depth - 3) treatment so a tactical line
+                    // is not blindly chopped.
+                    int reduction = opponentInCheck ? 2 : 3;
+                    int adjustedDepth = depth - 1 - reduction;
+                    if (adjustedDepth < 1) adjustedDepth = 1;
+                    score = -negamax(-alpha - 1, -alpha, adjustedDepth);
                 }
                 else
                 {
-                    // Ethereal-style LMR formula
+                    // quiet moves: Ethereal-style LMR formula, then nudge the
+                    // reduction by history so promising quiet moves are
+                    // reduced less and quiet moves with bad history more.
                     double depthAdjustment = 0.7844 + std::log(depth) * std::log(movesSearched) / 2.4696;
-                    int adjustedDepth = static_cast<int>(std::max(1.0, depth - 1 - depthAdjustment));
+                    int reduction = (int)depthAdjustment;
+
+                    // history adjustment. mainHistory + 1-ply continuation
+                    // history are each bounded to roughly +- HIST_MAX, so the
+                    // combined score is in [-16384, +16384] and divides cleanly
+                    // by 4096 to give a +- 4 ply reduction nudge.
+                    int histScore = mainHistory[getPiece(move)][getTarget(move)] + getContHist(move);
+                    reduction -= histScore / 4096;
+
+                    // do not reduce quiet check-givers as hard
+                    if (opponentInCheck)
+                        reduction--;
+
+                    if (reduction < 0) reduction = 0;
+
+                    int adjustedDepth = depth - 1 - reduction;
+                    if (adjustedDepth < 1) adjustedDepth = 1;
                     score = -negamax(-alpha - 1, -alpha, adjustedDepth);
                 }
             }
@@ -816,24 +837,63 @@ void search(int depth)
 
         followPV = 1;
 
-        score = negamax(alpha, beta, currentDepth);
-
-        // if search was aborted, do not retry aspiration or print
-        // partial info; just bail out so the previous iteration's PV
-        // stands as the bestmove.
-        if (stopped == 1)
-            break;
-
-        // aspiration window fail -> retry full window
-        if ((score <= alpha) || (score >= beta))
+        // aspiration window. for the first few iterations we search with the
+        // full window since the score has not stabilised yet. from depth 4
+        // we narrow the window around the previous score; on a fail-high or
+        // fail-low we double delta and widen the offending bound, retrying
+        // at the same depth. once delta exceeds 800 we give up and fall back
+        // to the full window so the search always converges.
+        int delta = 50;
+        if (currentDepth >= 4)
+        {
+            alpha = score - delta;
+            beta  = score + delta;
+            if (alpha < -infinity) alpha = -infinity;
+            if (beta  >  infinity) beta  =  infinity;
+        }
+        else
         {
             alpha = -infinity;
-            beta = infinity;
-            continue;
+            beta  =  infinity;
         }
 
-        alpha = score - 50;
-        beta = score + 50;
+        while (1)
+        {
+            score = negamax(alpha, beta, currentDepth);
+
+            // if search was aborted, do not retry aspiration or print
+            // partial info; just bail out so the previous iteration's PV
+            // stands as the bestmove.
+            if (stopped == 1)
+                break;
+
+            // accept if score is strictly inside the window
+            if (score > alpha && score < beta)
+                break;
+
+            // fail-low: widen alpha down
+            if (score <= alpha)
+            {
+                alpha = score - delta;
+                if (alpha < -infinity) alpha = -infinity;
+            }
+            // fail-high: widen beta up
+            else
+            {
+                beta = score + delta;
+                if (beta > infinity) beta = infinity;
+            }
+
+            delta *= 2;
+            if (delta > 800)
+            {
+                alpha = -infinity;
+                beta  =  infinity;
+            }
+        }
+
+        if (stopped == 1)
+            break;
 
         if (PVLength[0])
         {

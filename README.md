@@ -1,6 +1,6 @@
 
 # BetterThanCris Chess Bot in C(++)
- - Bot was written primarily in C but utilises a few C++ features. Most of the code is in `.cpp` files but follows C programming conventions and structure.
+ Bot was written primarily in C but utilises a few C++ features. Most of the code is in `.cpp` files but follows C programming conventions and structure.
 ## Table of Contents 
  1. [Introduction](#introduction)
  2. [Strength](#strength)  
@@ -13,10 +13,10 @@
  - Aggressive & Entertaining Chess
  - Created by Gustavo Knudsen
  - UCI Protocol Chess Engine
- - Current Version: 2.5
+ - Current Version: 2.6
  - Is, In Fact, Better Than Cris
 ## Strength
-**Version 2.5**
+**Version 2.3**
 - [CCRL](https://www.computerchess.org.uk/ccrl/404/) Blitz Rating [Estimate](https://docs.google.com/spreadsheets/d/1t2gDEfoMDtqAA5uL9U_GPA9CijjlMrVK4AR4DiAqqGU/edit?usp=sharing): 2071 ± 20
 - [Lichess](https://lichess.org/@/BetterThanCris) (Playing Almost Exclusively Against Other Bots):
 	- Bullet: 2301 Peak, Blitz: 2267 Peak
@@ -42,17 +42,23 @@
 	- Captures-Only Move Generator
 	- SEE Pruning of Losing Captures
  - Iterative Deepening
- - Aspiration Windows
+ - Aspiration Windows w/ Widening on Fail
  - Move Ordering:
 	- Static Exchange Evaluation (SEE)
 	- Good vs Bad Capture Classification
 	- MVV/LVA + Capture History
+	- Insertion Sort
  - Principle Variation Search (PVS)
  - PV Node Pruning
  - Null Move Pruning
  - Reverse Futility Pruning (RFP) / Static Null Move Pruning
+ - Frontier Futility Pruning (Quiet Moves at Low Depth)
+ - Late Move Pruning (LMP)
  - Razoring
- - Late Move Reductions (LMR)
+ - Late Move Reductions (LMR):
+	- Ethereal-Style Formula
+	- History-Based Reduction Adjustment
+	- Reduced Less for Check-Givers
  - Mate Distance Pruning
  - Gravity History:
 	- Main History (Quiet Moves)
@@ -63,7 +69,6 @@
  - Transposition Table w/ Zobrist Hashing
  - Hash Move Ordering
  - Repetitions
- - Contempt-Aware Draw Scoring
  - Single-Legal-Move Fast Path
 
 **Evaluation**
@@ -82,28 +87,73 @@
 - Tempo
 
 ## To Do
+
+**Search (High Impact):**
+- Improve Transposition Table
+	- Depth-Preferred Replacement w/ Generation Tracking
+	- Multi-Entry Buckets (Needs Instrumented Cutoff Logging - First Attempt Regressed)
+- Re-attempt Improving Heuristic
+	- Milder Constants Than Stockfish Default (Our Eval Signal Is Noisier)
+- Re-attempt Best-Move Stability Time Use
+	- Higher Threshold and Milder Shrink Factor
+- Singular Extensions
+- Counter-Move Heuristic
+- 2-Ply Continuation History
+- Razoring Tuning
+
+**Evaluation (High Impact):**
+- Texel / SPSA Tuning of Eval Weights
+	- Largest "Free Elo" Lever Without Eval Structure Changes
 - Improve King Safety Evaluation
-	- Defending Pieces | Checks | Mobility
-- Add Syzygy EGTB
-- Improve Endgames
-	- Blockage | Draws | Known Endgames
+	- Tone Down the kingPenalty^2 / 4096 Quadratic
+	- Add Defending Pieces | Safe Checks | Mobility into Safety Calc
+- Complex Mobility w/ Pin Exclusion
+	- Re-attempt the Existing Scaffolding (Compute Pin Info Once Per Node)
+- NNUE (Long-Term)
 - Improve General Evaluation
 	- Outposts | Strong Squares | Piece Attacks | Passed Pawn Improvement | Trapped Pieces
-- Improve Time Management
-	- Best-Move Stability | Fail-Low at Root Extension
-- Improve Transposition Table
-	- Depth-Preferred Replacement | Bucketed Slots
-- Add Pattern Evaluations
-- Improve Mobility
-- Add Space Evaluation
+- Pattern Evaluations
+- Threat Evaluation
+- Space Evaluation
+- Improve Endgames
+	- Blockage | Draws | Known Endgames
+
+**UCI & Infrastructure:**
 - Add Pondering Option
-- Add Parallel Search / Shared Hash Table
+- Add Multi-PV Search
+- Add Syzygy EGTB
+- Add Opening Book Support
+- Announce `Hash` Option in `uci` Reply (Currently Handled but Not Advertised)
+- Add Parallel Search / Lazy SMP
 
  
 ## Play BetterThanCris
  - If online, can be played on  [Lichess](https://lichess.org/@/BetterThanCris) 
  - Can also be downloaded and ran like a normal UCI engine locally on a GUI
 ## Releases
+**Version 2.6 - WIP**
+- Added Late Move Pruning (LMP):
+	- Skip Quiet Moves Once `movesSearched >= 3 + depth*depth` at depth <= 8
+	- Only at Non-PV, Non-Check, Non-Check-Giving Nodes With a Real Alpha Baseline
+- Added Frontier Futility Pruning:
+	- Skip Quiet Move if `eval + 120 * depth <= alpha` at depth <= 6
+- Added History-Based LMR Adjustment:
+	- Ethereal-Style Base Reduction Then +- 4 Ply Nudge From mainHistory + 1-Ply Continuation History
+	- Quiet Check-Givers Get One Less Ply of Reduction
+- Added Aspiration Window Widening on Fail:
+	- Delta Starts at 50, Doubles on Each Fail, Same Bound Widened Around the Failed Score
+	- Full Window Fallback Once Delta Exceeds 800
+	- Iterations No Longer Skipped on Aspiration Fail (Previous Behaviour)
+- Effect of the Above Four: Roughly 71.2% Score vs 2.5
+- Replaced Bubble/Selection Sort with Insertion Sort in Move Ordering:
+	- Stable Tie-Breaking and Lower Per-Sort Cost on Near-Sorted Lists
+	- Effect: 60% Score Over the Pre-Sort 2.6 Build, Top of a 3-Way Round-Robin
+- Tried and Reverted (Both Lost in 3-Way Round-Robin vs Sort-Only):
+	- Improving Heuristic (Stockfish-Style LMP/Futility/LMR Gates by `eval[ply] > eval[ply-2]`)
+		- 45.5% Score; LMP Threshold Halving on Not-Improving Too Aggressive for Our Eval Signal
+	- Best-Move Stability + Fail-Low Time Adjustment
+		- 51.0% Score; 70% Soft-Limit Shrink Was Too Aggressive
+
 **Version 2.5 - 24/05/2026**
 - Added Static Exchange Evaluation (SEE):
 	- Bad-Capture Pruning in Quiescence
@@ -118,12 +168,13 @@
 	- Bonus on Cutoff, Malus on Non-Best Moves at the Same Node
 	- Histories Now Carry Across Moves (Reset Only on `ucinewgame`)
 - Added Single-Legal-Move Fast Path (Skip Search When Forced)
-- Added Contempt-Aware Draw Scoring (Both Sides Prefer Play-On in Roughly Even Positions)
 - Time Management Rewrite:
 	- Separated Soft Target (`softLimit`) and Hard Cap (`stoptime`)
 	- Iterative Deepening Skips Iterations That Cannot Finish in Budget
 	- No Aspiration Retry After a Stopped Search
 	- Roughly 35% Less Overshoot at 2min+1s Time Control
+- Briefly Added Then Removed Contempt-Aware Draw Scoring
+	-Contempt gave ~70 Elo loss; Reverted to Plain Draw Return
 
 **Version 2.4 - 22/05/2026**
 - Refactored Engine Into Modular `src/` Layout
