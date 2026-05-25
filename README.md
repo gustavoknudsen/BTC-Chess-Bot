@@ -1,5 +1,11 @@
 
-# BetterThanCris Chess Bot in C(++)
+<div align="center">
+  <img src="logo.png" alt="BetterThanCris" width="150">
+  <h3>BetterThanCris Chess Bot</h3>
+</div>
+
+---
+
  Bot was written primarily in C but utilises a few C++ features. Most of the code is in `.cpp` files but follows C programming conventions and structure.
 ## Table of Contents 
  1. [Introduction](#introduction)
