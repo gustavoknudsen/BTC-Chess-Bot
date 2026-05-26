@@ -423,8 +423,12 @@ extern const int fullDepthMoves = 5;
 extern const int reductionLimit = 2;
 
 
-// negamax alpha beta search
-static inline int negamax(int alpha, int beta, int depth)
+// negamax alpha beta search.
+//   excludedMove != 0 means we are inside a singular-extension verification:
+//   the search runs on the SAME position with one move forbidden in the move
+//   loop, and must not write TT, do null move, RFP, razoring, LMP/futility,
+//   nor recursively trigger another singular check.
+static inline int negamax(int alpha, int beta, int depth, int excludedMove)
 {
     PVLength[ply] = ply;
 
@@ -446,10 +450,17 @@ static inline int negamax(int alpha, int beta, int depth)
         if (alpha >= beta) return alpha;
     }
 
-    // always probe TT so bestMove gets populated for move ordering
-    score = probeHash(alpha, beta, depth, &bestMove);
-    if (ply && pvNode == 0 && score != noHashEntry)
+    // TT probe. inside a singular verification we still want the entry for
+    // move ordering, but we must NOT take a TT cutoff (the stored score
+    // includes the move we are trying to exclude).
+    int ttHit = 0, ttDepth = 0, ttFlag = 0, ttScore = 0;
+    score = probeHash(alpha, beta, depth, &bestMove, &ttHit, &ttDepth, &ttFlag, &ttScore);
+    if (excludedMove == 0 && ply && pvNode == 0 && score != noHashEntry)
         return score;
+
+    // remember the TT-best move separately; bestMove gets reassigned in the
+    // move loop, but the singular extension always applies to the TT move.
+    int ttMove = bestMove;
 
     if ((nodes & 2047) == 0)
         communicate();
@@ -472,16 +483,16 @@ static inline int negamax(int alpha, int beta, int depth)
     int legalMoves = 0;
     int eval = evaluate();
 
-    // reverse futility pruning
-	if (depth < 3 && !pvNode && !inCheck && abs(beta) < mateScore)
+    // reverse futility pruning (skip during singular verification)
+	if (excludedMove == 0 && depth < 3 && !pvNode && !inCheck && abs(beta) < mateScore)
 	{
 		int evalMargin = 120 * depth;
 		if (eval - evalMargin >= beta)
 			return eval - evalMargin;
 	}
 
-    // null move pruning
-    if (depth >= 3 && inCheck == 0 && ply)
+    // null move pruning (skip during singular verification)
+    if (excludedMove == 0 && depth >= 3 && inCheck == 0 && ply)
     {
         copyBoard();
 
@@ -500,7 +511,7 @@ static inline int negamax(int alpha, int beta, int depth)
         // history does not get fed garbage on the next ply
         playedMoveStack[ply] = 0;
 
-        score = -negamax(-beta, -beta + 1, depth - 1 - 2);
+        score = -negamax(-beta, -beta + 1, depth - 1 - 2, 0);
 
         ply--;
         repetitionIndex--;
@@ -514,8 +525,8 @@ static inline int negamax(int alpha, int beta, int depth)
             return beta;
     }
 
-    // razoring (Strelka-style)
-    if (!pvNode && !inCheck && depth <= 3)
+    // razoring (Strelka-style) (skip during singular verification)
+    if (excludedMove == 0 && !pvNode && !inCheck && depth <= 3)
     {
         score = eval + 125;
         int newScore;
@@ -547,6 +558,50 @@ static inline int negamax(int alpha, int beta, int depth)
 
     sortMoves(moveList, bestMove);
 
+    // Singular extension verification.
+    //
+    // If the TT move is significantly better than all alternatives at a
+    // reduced depth, it is "singular" and gets a 1-ply extension when we
+    // actually search it below. The verification runs the SAME position with
+    // the TT move excluded, against a null window just below ttScore. If the
+    // search fails low (no other move reaches the window), the TT move is
+    // singular.
+    //
+    // Conditions (conservative first pass):
+    //   - not root, not inside another singular verification
+    //   - depth >= 8
+    //   - we have a TT hit with a non-empty best move
+    //   - TT depth >= depth - 3 (entry is meaningful at this depth)
+    //   - TT flag is lower-bound or exact (the stored score would cut off
+    //     at the original depth)
+    //   - TT score is not in mate territory (mate scores misbehave in
+    //     null-window verification)
+    int singularExtension = 0;
+    if (excludedMove == 0
+        && ply > 0
+        && depth >= 8
+        && ttHit
+        && ttMove != 0
+        && ttDepth >= depth - 3
+        && (ttFlag == hashFlagBeta || ttFlag == hashFlagExact)
+        && abs(ttScore) < mateScore)
+    {
+        int singularBeta  = ttScore - 2 * depth;
+        int singularDepth = (depth - 1) / 2;
+
+        int singScore = negamax(singularBeta - 1, singularBeta, singularDepth, ttMove);
+
+        // verifier reuses this ply's PV/length slots; reset so its scratch
+        // PV is not propagated upward
+        PVLength[ply] = ply;
+
+        if (stopped == 1)
+            return 0;
+
+        if (singScore < singularBeta)
+            singularExtension = 1;
+    }
+
     int movesSearched = 0;
 
     // remember the quiets and captures we tried so we can apply malus on cutoff
@@ -558,6 +613,10 @@ static inline int negamax(int alpha, int beta, int depth)
     for (int count = 0; count < moveList->count; count++)
     {
         int move = moveList->moves[count];
+
+        // singular verification skips the TT move on the same position
+        if (move == excludedMove)
+            continue;
 
         copyBoard();
 
@@ -580,12 +639,21 @@ static inline int negamax(int alpha, int beta, int depth)
                                                         getLSFBIndex(bitboards[k]),
                                                         side ^ 1);
 
+        // depth offset for this move: +1 ply if this is the TT-best move and
+        // it passed the singular verification above. only the TT move can
+        // extend; all other moves search at depth - 1.
+        int extension = (move == ttMove) ? singularExtension : 0;
+        int newDepth  = depth - 1 + extension;
+
         // LMP and frontier futility on quiet moves.
         // we only prune at non-pv, non-check nodes once at least one move
         // has been searched (so we have a real alpha baseline), and only on
         // quiet moves that do not give check. mate-territory alpha disables
         // both since we never want to drop a saving sequence in mate space.
-        if (movesSearched > 0 && !pvNode && !inCheck && !opponentInCheck
+        // also disabled during singular verification (must search every
+        // non-excluded move to a meaningful depth).
+        if (excludedMove == 0
+            && movesSearched > 0 && !pvNode && !inCheck && !opponentInCheck
             && !getCapture(move) && !getPromoted(move)
             && abs(alpha) < mateScore)
         {
@@ -614,7 +682,7 @@ static inline int negamax(int alpha, int beta, int depth)
 
         if (movesSearched == 0)
         {
-            score = -negamax(-beta, -alpha, depth - 1);
+            score = -negamax(-beta, -alpha, newDepth, 0);
         }
         else
         {
@@ -628,9 +696,9 @@ static inline int negamax(int alpha, int beta, int depth)
                     // get the lighter (depth - 3) treatment so a tactical line
                     // is not blindly chopped.
                     int reduction = opponentInCheck ? 2 : 3;
-                    int adjustedDepth = depth - 1 - reduction;
+                    int adjustedDepth = newDepth - reduction;
                     if (adjustedDepth < 1) adjustedDepth = 1;
-                    score = -negamax(-alpha - 1, -alpha, adjustedDepth);
+                    score = -negamax(-alpha - 1, -alpha, adjustedDepth, 0);
                 }
                 else
                 {
@@ -653,9 +721,9 @@ static inline int negamax(int alpha, int beta, int depth)
 
                     if (reduction < 0) reduction = 0;
 
-                    int adjustedDepth = depth - 1 - reduction;
+                    int adjustedDepth = newDepth - reduction;
                     if (adjustedDepth < 1) adjustedDepth = 1;
-                    score = -negamax(-alpha - 1, -alpha, adjustedDepth);
+                    score = -negamax(-alpha - 1, -alpha, adjustedDepth, 0);
                 }
             }
             else
@@ -666,10 +734,10 @@ static inline int negamax(int alpha, int beta, int depth)
             // PVS re-search
             if (score > alpha)
             {
-                score = -negamax(-alpha - 1, -alpha, depth - 1);
+                score = -negamax(-alpha - 1, -alpha, newDepth, 0);
 
                 if ((score > alpha) && (score < beta))
-                    score = -negamax(-beta, -alpha, depth - 1);
+                    score = -negamax(-beta, -alpha, newDepth, 0);
             }
         }
 
@@ -707,7 +775,9 @@ static inline int negamax(int alpha, int beta, int depth)
 
             if (score >= beta)
             {
-                recordHash(beta, depth, hashFlagBeta, move, bestMove);
+                // do not pollute TT with the result of a singular verification
+                if (excludedMove == 0)
+                    recordHash(beta, depth, hashFlagBeta, move, bestMove);
 
                 int bonus = historyBonus(depth);
 
@@ -756,13 +826,19 @@ static inline int negamax(int alpha, int beta, int depth)
     // checkmate / stalemate
     if (legalMoves == 0)
     {
+        // inside singular verification, "no legal moves" just means every
+        // move was the excluded one; that is not mate, return alpha
+        if (excludedMove != 0)
+            return alpha;
+
         if (inCheck)
             return -mateValue + ply;
         else
             return 0;
     }
 
-    recordHash(alpha, depth, hashFlag, bestMove, bestMove);
+    if (excludedMove == 0)
+        recordHash(alpha, depth, hashFlag, bestMove, bestMove);
 
     return alpha;
 }
@@ -859,7 +935,7 @@ void search(int depth)
 
         while (1)
         {
-            score = negamax(alpha, beta, currentDepth);
+            score = negamax(alpha, beta, currentDepth, 0);
 
             // if search was aborted, do not retry aspiration or print
             // partial info; just bail out so the previous iteration's PV
