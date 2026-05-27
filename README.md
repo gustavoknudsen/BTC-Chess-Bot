@@ -66,6 +66,9 @@
 	- History-Based Reduction Adjustment
 	- Reduced Less for Check-Givers
  - Mate Distance Pruning
+ - Singular Extensions:
+	- TT-Best Move Singularity Verification at Reduced Depth
+	- +1 Ply Extension if All Other Moves Fail Low vs `ttScore - 2 * depth`
  - Gravity History:
 	- Main History (Quiet Moves)
 	- Capture History (By Captured Piece)
@@ -102,9 +105,9 @@
 	- Milder Constants Than Stockfish Default (Our Eval Signal Is Noisier)
 - Re-attempt Best-Move Stability Time Use
 	- Higher Threshold and Milder Shrink Factor
-- Singular Extensions
 - Counter-Move Heuristic
 - 2-Ply Continuation History
+	- Stockfish-Shape Implementation Tested Neutral on 250 Games at Current Eval; Deferred to Future Eval
 - Razoring Tuning
 
 **Evaluation (High Impact):**
@@ -154,11 +157,19 @@
 - Replaced Bubble/Selection Sort with Insertion Sort in Move Ordering:
 	- Stable Tie-Breaking and Lower Per-Sort Cost on Near-Sorted Lists
 	- Effect: 60% Score Over the Pre-Sort 2.6 Build, Top of a 3-Way Round-Robin
-- Tried and Reverted (Can Revisit):
+- Added Singular Extensions:
+	- TT-Best Move Singularity Verification at Reduced Depth, +1 Ply Extension on Fail-Low
+	- Conditions: depth >= 8, ttDepth >= depth - 3, Beta/Exact Flag, Non-Mate ttScore
+	- singularBeta = ttScore - 2 * depth, Verifier at (depth - 1) / 2 with All Pruning Disabled
+	- Effect: 71.1% Score Over the Pre-Singular 2.6 Build (22W 20D 3L Over 45 Games)
+- Tried and Reverted/Deferred (Can Revisit):
 	- Improving Heuristic (Stockfish-Style LMP/Futility/LMR Gates by `eval[ply] > eval[ply-2]`)
 		- 45.5% Score; LMP Threshold Halving on Not-Improving Too Aggressive for Our Eval Signal
 	- Best-Move Stability + Fail-Low Time Adjustment
 		- 51.0% Score; 70% Soft-Limit Shrink Was Too Aggressive
+	- 2-Ply Continuation History (Stockfish-Shape: Symmetric Reads, 3/4 Update Bonus on 2-Ply Table)
+		- 49.0% Score on Both a 150-Game Match and a 100-Game Tuned-Variant Rematch
+		- Not a Regression but Not a Confirmed Gain; Deferred to v2.10 With Stronger Eval Signal
 
 **Version 2.5 - 24/05/2026**
 - Added Static Exchange Evaluation (SEE):

@@ -23,23 +23,21 @@ Already merged into main:
 - UCI handshake fixes: Hash advertised, UCI_EngineAbout added, Move Overhead and Hash defaults aligned with source
 - Binary renamed to btc<version>.exe (e.g. btc26.exe), derived from ENGINE_VERSION in src/version.h
 - TT default raised 12MB to 128MB, max raised 128MB to 4096MB
+- Singular extensions: TT-best singularity verification at reduced depth (depth >= 8, ttDepth >= depth - 3, singularBeta = ttScore - 2 * depth, verifier at (depth - 1) / 2, +1 ply extension on fail-low). +156 Elo over 45 self-play games.
 
-Tried and reverted in 2.6 (kept in memory for future re-attempts):
+Tried in 2.6, deferred to a stronger eval (kept in memory; revisit list lives in v2.10):
 
-- 4-entry TT buckets with depth-preferred + age replacement: regressed startpos depth-10 nodes by 80%, cause unknown without instrumented cutoff logging
-- Stockfish-style improving heuristic gating LMP/futility/RFP/LMR: lost 45.5% in 3-way round-robin; LMP threshold halving on not-improving was too aggressive for the current eval signal
-- Best-move stability time shrink + fail-low at root extension: lost 51.0% in 3-way round-robin; 70% soft-limit shrink was too aggressive
+- 4-entry TT buckets with depth-preferred + age replacement: regressed startpos depth-10 nodes by 80%, cause unknown without instrumented cutoff logging. Final reattempt slot lives in v3.x where Lazy SMP makes multi-entry buckets functionally necessary.
+- Stockfish-style improving heuristic gating LMP/futility/RFP/LMR: lost 45.5% in 3-way round-robin; LMP threshold halving on not-improving was too aggressive for the current eval signal.
+- Best-move stability time shrink + fail-low at root extension: lost 51.0% in 3-way round-robin; 70% soft-limit shrink was too aggressive.
+- 2-ply continuation history (Stockfish-shape: symmetric reads, 3/4 update bonus on the 2-ply table to match SF's 780/1040 weighting). Neutral self-play: 49.0% on both a 150-game match and a 100-game tuned-variant rematch against the singular-extensions base; not a regression, but not a confirmed gain at the current eval signal. Branch `v2.6-2ply-cont-hist` preserves the implementation for cherry-pick.
 
 ## v2.6 final (this cycle)
 
 Search-focused. Ship when each item proves +Elo in self-play.
 
-1. Singular extensions. When the TT-best move scores significantly better than alternatives at reduced depth, extend it by 1 ply. Standard, low risk. Estimate: +20-40 Elo.
-2. 2-ply continuation history. Extend the existing 1-ply table with a 2-ply layer. Estimate: +10-20 Elo.
-3. Counter-move heuristic. Per [prev_piece][prev_to] table of single counter moves. Estimate: +5-15 Elo.
-4. Internal iterative reductions (IIR). When the node lacks a TT move at sufficient depth, reduce depth by 1 instead of doing internal iterative deepening. Cheap. Estimate: +10-20 Elo.
-5. Re-attempt improving heuristic with milder constants. Drop the LMP threshold halving; only adjust margins by a smaller amount. Estimate: +10-25 Elo if it sticks, otherwise defer to v2.10.
-6. Re-attempt TT bucketing with instrumented cutoff logging. Diagnose the bucket=4 regression. Ship only if positive. Estimate: +20-50 Elo if it works.
+1. Counter-move heuristic. Per [prev_piece][prev_to] table of single counter moves. Estimate: +5-15 Elo.
+2. Internal iterative reductions (IIR). When the node lacks a TT move at sufficient depth, reduce depth by 1 instead of doing internal iterative deepening. Cheap. Estimate: +10-20 Elo.
 
 ## v2.7 (king safety + threats)
 
@@ -72,16 +70,17 @@ Goal: close more of the gap to the classical-eval ceiling.
 
 ## v2.10 (search second pass with the stronger eval)
 
-A stronger eval signal makes the heuristics that failed in 2.6 work, and unlocks several modern search techniques that depend on a reliable static eval.
+A stronger eval signal makes the heuristics that failed in 2.6 work, and unlocks several modern search techniques that depend on a reliable static eval. Items 1-4 are new techniques; items 5-7 are revisits of v2.6 experiments that did not stick on the weaker eval signal; items 8-9 are tuning.
 
 1. Correction history. Five small tables (pawn structure, minor-piece config, non-pawn-white, non-pawn-black, continuation) that record the gap between static eval and observed search result, then bias the next static eval by the learned correction. Independent of whether eval is classical or neural. Estimate: +30-60 Elo.
 2. ProbCut. At depth >= 5 with a capture/promotion move, do a reduced search at `beta + ~200` to find moves that almost surely exceed beta, then prune. Estimate: +20-40 Elo.
 3. Pawn history. Separate history table keyed by pawn-structure hash, for quiet move ordering. Captures the intuition that good moves in one pawn structure are often good in similar structures. Estimate: +15-30 Elo.
 4. Low-ply history. Separate history for near-root nodes, refreshed faster than the main table. Estimate: +5-15 Elo.
-5. Improving heuristic. Now reliable because eval is less noisy. Likely works with default constants this time.
-6. Best-move stability and fail-low at root in time management. Same reasoning.
-7. Razoring tuning. Texel-tune the razoring margins.
-8. Aspiration window constants. Tune the delta progression.
+5. 2-ply continuation history (revisit from v2.6). Stockfish-shape implementation (symmetric reads of the 1-ply and 2-ply tables, 3/4 update bonus on the 2-ply table) tested neutral on 250 total games at the v2.6 eval signal. Hypothesis is that with the cleaner eval the cutoff signal becomes informative enough that the 2-ply table converges to useful values; revive the `v2.6-2ply-cont-hist` branch and re-test.
+6. Improving heuristic (revisit from v2.6). Now plausibly reliable because eval is less noisy. Likely works with default constants this time.
+7. Best-move stability and fail-low at root in time management (revisit from v2.6). Same reasoning.
+8. Razoring tuning. Texel-tune the razoring margins.
+9. Aspiration window constants. Tune the delta progression.
 
 ## v2.x bonus (UCI and features, interleaved when convenient)
 
@@ -136,11 +135,11 @@ These should land alongside the per-version work.
 
 | Version | New work                                                | Estimated gain vs prior |
 |---------|---------------------------------------------------------|-------------------------|
-| 2.6     | search refinements + IIR + (maybe) ProbCut              | +60-130                 |
+| 2.6     | LMP, futility, LMR, aspiration, sort, UCI, singular extensions, counter-move, IIR | +150 confirmed so far on singular extensions alone; +20-40 remaining from counter-move and IIR |
 | 2.7     | king safety re-tune, threats activation                 | +100-200                |
 | 2.8     | mobility w/ pin exclusion, attackedBy2, lazy thresholds, Texel pipeline | +100-220 |
 | 2.9     | pawn hash, missing eval terms, retune                   | +60-160                 |
-| 2.10    | correction history, ProbCut, pawn hist, search retune   | +80-170                 |
+| 2.10    | correction history, ProbCut, pawn hist, low-ply, 2-ply cont hist revisit, improving revisit, bm-stability revisit, search retune | +80-170 |
 | 3.0     | NNUE                                                    | +200-500                |
 | 3.x     | Lazy SMP, network upgrades, secondary feature sets      | +100-300 per major step |
 
