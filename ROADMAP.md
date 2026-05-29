@@ -12,6 +12,8 @@ Past that ceiling, the path to top-engine strength runs through NNUE. v3.0 is th
 
 Many modern search techniques (correction history, ProbCut, multi-ply continuation history, pawn history) are independent of whether evaluation is classical or neural. They appear in the search section of the roadmap regardless of where NNUE lands.
 
+Much of the v2.7-v2.9 eval work is **rewriting** existing BTC terms to match SF's canonical shape, not just adding new constants. Several current terms compile but use a simplified or wrong shape: the per-piece-type threat cascade inline in `evaluateWhite/BlackKnight` and `Bishop`, flag-style `Hanging`, the simplified `kingPenalty` sum, `getSimpleMobility`, the flat `KnightOnQueen`, the rank+file passed-pawn bonus, and the narrow `adjustEndgameEvaluation` (currently disabled). When this roadmap says "re-tune", "activate", or "detailed", the actual work is usually to delete the simplified version, port SF's term from `.stockfish_src_old/` verbatim, and then Texel-tune the constants.
+
 ## Current state (v2.6 in flight)
 
 Already merged into main:
@@ -31,27 +33,28 @@ Tried in 2.6, deferred to a stronger eval (kept in memory; revisit list lives in
 - Stockfish-style improving heuristic gating LMP/futility/RFP/LMR: lost 45.5% in 3-way round-robin; LMP threshold halving on not-improving was too aggressive for the current eval signal.
 - Best-move stability time shrink + fail-low at root extension: lost 51.0% in 3-way round-robin; 70% soft-limit shrink was too aggressive.
 - 2-ply continuation history (Stockfish-shape: symmetric reads, 3/4 update bonus on the 2-ply table to match SF's 780/1040 weighting). Neutral self-play: 49.0% on both a 150-game match and a 100-game tuned-variant rematch against the singular-extensions base; not a regression, but not a confirmed gain at the current eval signal. Branch `v2.6-2ply-cont-hist` preserves the implementation for cherry-pick.
+- Internal iterative reductions (simple port: `depth--` at depth >= 6 with no TT move, no `!allNode` / `!ss->followPV` / `priorReduction <= 3` gating because BTC tracks none of those). Lost 43.0% to base 2.6 over 71 self-play games (11W 39D 21L, roughly -100 Elo). Likely failing because reducing at all-nodes hurts more than at cut-nodes, and BTC's single-entry always-replace TT makes "no TT move" a noisier signal than SF's 4-entry buckets. Branch `v2.6-iir` preserves the implementation for cherry-pick.
 
 ## v2.6 final (this cycle)
 
 Search-focused. Ship when each item proves +Elo in self-play.
 
-1. Counter-move heuristic. Per [prev_piece][prev_to] table of single counter moves. Estimate: +5-15 Elo.
-2. Internal iterative reductions (IIR). When the node lacks a TT move at sufficient depth, reduce depth by 1 instead of doing internal iterative deepening. Cheap. Estimate: +10-20 Elo.
+1. Counter-move heuristic. Per [prev_piece][prev_to] table of single counter moves. Used in quiet move ordering between killers and history. Estimate: +5-15 Elo.
 
 ## v2.7 (king safety + threats)
 
 Goal: the easiest, highest-confidence classical-eval gains. Both items have direct references in the classical eval the constants in `eval_constants.cpp` were originally lifted from.
 
-1. King safety re-tune. Replace the current `kingPenalty^2 / 4096` quadratic. The squaring shape is fine, but the input `kingDanger` needs to be a sum of many small contributions rather than one big one: attacker count by piece-type weight, weak squares in the king ring, unsafe-check count, pinned-piece count, king-flank attack pressure, mobility differential, no-enemy-queen bonus, knight defense, pawn-shelter influence, plus a threshold so small attacks give zero penalty. A safe-check table by piece type with single/multiple distinction. The "single big penalty squared" shape is what produces the 300-500cp swings on 3 attackers today. Estimate: +50-100 Elo. Direct cause of the "engine sacrifices for nothing" symptom.
-2. Activate the threats scaffolding. Constants for `ThreatByMinor`, `ThreatByRook`, `ThreatByKing`, `ThreatByPawnPush`, `ThreatBySafePawn`, `Hanging`, `WeakQueen`, `RestrictedPiece` are defined in `eval_constants.cpp` but almost none are wired into `evaluate()`. Wire them up. Estimate: +50-100 Elo.
+1. King safety re-tune. Replace the current `kingPenalty^2 / 4096` quadratic. The squaring shape is fine, but the input `kingDanger` needs to be a sum of many small contributions rather than one big one: attacker count by piece-type weight, weak squares in the king ring, unsafe-check count, pinned-piece count, king-flank attack pressure, mobility differential, no-enemy-queen bonus, knight defense, pawn-shelter influence, plus a threshold so small attacks give zero penalty. A safe-check table by piece type with single/multiple distinction. The "single big penalty squared" shape is what produces the 300-500cp swings on 3 attackers today. Additional king-section terms that sit *alongside* the kingDanger quadratic in SF's `king()` should land in the same pass: `PawnlessFlank` (king's file has no pawns), `FlankAttacks * kingFlankAttack` (linear penalty for attacks in the king flank), and `+3 * kingFlankAttack² / 8 - 4 * kingFlankDefense` inside the kingDanger sum itself. Note: the mobility-differential contribution makes this partially blocked on v2.8 mobility re-work — land it first with a zeroed mobility term, top up after v2.8. Estimate: +50-100 Elo. Direct cause of the "engine sacrifices for nothing" symptom.
+2. Rewrite and activate the threats scaffolding. Constants for `ThreatByMinor`, `ThreatByRook`, `ThreatByKing`, `ThreatByPawnPush`, `ThreatBySafePawn`, `Hanging`, `WeakQueen`, `RestrictedPiece` are defined in `eval_constants.cpp` but almost none are wired into `evaluate()`. The piece-section threat code currently inline in `evaluateWhite/BlackKnight` and `Bishop` (a cascade of per-piece-type `if`s plus a flag-style `Hanging`) should be **deleted and replaced** with SF's `threats()` shape: iterate the attacked weak set once, index `ThreatByMinor[type_of(piece)]` per attacker, use `popcount` for `Hanging` and `WeakQueenProtection` instead of flags. `KnightOnQueen` and `SliderOnQueen` slip to v2.8 since they need mobility-area info and `attackedBy2`. Estimate: +50-100 Elo.
+3. Piece-on-king-ring bonuses and outpost rewrite. `BishopOnKingRing` (bishop X-raying through pawns onto the enemy king ring) and `RookOnKingRing` (rook sharing a file with the king ring) fire when the piece is *not* a direct attacker; they sit in the piece-section evaluators alongside the existing king-distance term. The current outpost detection (per-piece if-else in `evaluateWhite/BlackKnight` and `Bishop`) should be rewritten to SF's mask form: build `OutpostRanks & attackedBy[Us][PAWN] & ~pawn_attacks_span(Them)` once per side, then test piece occupancy and reachability against it. Cleaner and avoids the current outpost / uncontested-outpost / reachable-outpost double-counting risk. Estimate: +5-20 Elo combined.
 
 ## v2.8 (eval surgery and tuning infrastructure)
 
 Goal: the largest classical eval improvement plus the multiplier that makes future tuning fast.
 
-1. Complex mobility with pin exclusion. Re-attempt the existing `positionCache` scaffolding. The previous failure was performance; fix it by computing pin info once per node in `updatePositionCache` (not per piece). Switch `getSimpleMobility` callers to the complex `getMobility` path, with queen X-rays through own queens and a separate queen mobility table. Estimate: +50-100 Elo.
-2. `attackedBy2` table. Squares attacked twice by a side, computed by intersecting attack tables in `initAttacksTotal`. Used as a building block by many downstream eval terms (weak squares around the king, safe-pawn detection, defended-piece detection). Estimate: +10-20 Elo standalone, more as a building block.
+1. Complex mobility with pin exclusion. Re-attempt the existing `positionCache` scaffolding. The previous failure was performance; fix it by computing pin info once per node in `updatePositionCache` (not per piece). Switch `getSimpleMobility` callers to the complex `getMobility` path, with queen X-rays through own queens and a separate queen mobility table. The pin info computed here feeds two follow-on rewrites: (a) the pinned-queen `WeakQueen` penalty (BTC has the constant in `eval_constants.cpp` but unused; SF applies it when the queen sits on a slider-blocker line, distinct from `WeakQueenProtection` on weak pieces); (b) mobility-area-aware `KnightOnQueen` and a new `SliderOnQueen` term, replacing BTC's current flat `KnightOnQueen` bonus with SF's version that only counts safe squares the attacker can actually reach (and gates the slider variant on `attackedBy2`). Estimate: +50-100 Elo.
+2. Use the existing `attackedBy2` table more aggressively. The table is already computed in `initAttacksTotal` via `firstPass`/`secondPass` accumulation but currently feeds only `stronglyProtected`/`defended`/`weak`. SF feeds `attackedBy2` into king-ring weak-square detection (consumed by v2.7 king safety), safe-pawn-push detection (threats), safe-check evaluation (king safety), and the `SliderOnQueen` gating above. The work here is wiring it into the v2.7 and item 1 rewrites, not computing the table. Estimate: +10-20 Elo as a building block.
 3. Lazy eval thresholds. Skip expensive eval components (king safety, threats, passed, space) when the cheap eval portion is already far above the alpha-beta window. Pure speed gain that allows more detailed eval at no per-node cost. Estimate: +5-15 Elo.
 4. Texel tuning pipeline. Standalone tuner binary linked against `evaluation.cpp`; a labeled dataset (Zurichess EPD, ~700K positions, free); gradient descent or local search on the constant tables in `eval_constants.cpp`. Run an initial Texel tune on the existing weights. Estimate: +30-80 Elo from the first tune alone, and a force multiplier for every later tuning decision.
 
@@ -61,16 +64,18 @@ After v2.8 the eval is substantially stronger and any future eval constant can b
 
 Goal: close more of the gap to the classical-eval ceiling.
 
-1. Pawn hash table. Cache pawn-structure eval keyed by pawn-only zobrist. Mostly an NPS win, and lets pawn eval be much more detailed without per-node cost. King shelter and storm fit naturally in the same pawn entry. Estimate: +20-40 Elo.
-2. Detailed passed pawn eval. King-distance scaling, blocker analysis, unstoppable-passer detection. Estimate: +20-40 Elo.
+1. Pawn hash table. Cache pawn-structure eval keyed by pawn-only zobrist. Mostly an NPS win, and lets pawn eval be much more detailed without per-node cost. King shelter and storm fit naturally in the same pawn entry. Once the cache lands, wire in the missing SF pawn terms: `BlockedPawn` at rank 5/6, `DoubledEarly` (early-file doubled pawn penalty), `KingOnFile` (penalty when the king sits on a semi-open or fully open file from its own side), `WeakLever` (constant + code already commented out in `evaluateWhite/BlackPawn`; uncomment), and the after-castle shelter probe (scaffolding for `c1/c8/g1/g8` shelter evaluation already drafted but commented out in `getKingSafety`; uncomment and verify the indices). Estimate: +20-40 Elo.
+2. Detailed passed pawn eval. **Rewrite** the existing rank+file bonus in `evaluateWhite/BlackPawn` to match SF's `passed()`: (a) king-proximity scaling `(km_them * 19/4 - km_us * 2) * w` at relative rank >= 4 where `km = min(distance(king, blockSq), 5)` and `w = 5*r - 13`; (b) a `k` factor (0/7/17/30/36, +5 if defended) when the block square is empty, based on which subset of the path-to-queen is attacked; (c) "helpers" rule that revives blocked candidate passers if a supporting friendly pawn is shift-east/west away; (d) `PassedFile * edge_distance(file)` deduction. The current code contributes only the rank+file bonus and ignores everything about the king race or path safety. Estimate: +20-40 Elo.
 3. Imbalance table. Material values that depend on counterpart pieces (bishop pair more valuable in open positions, knight more valuable with own pawns, etc.). Estimate: +10-30 Elo.
 4. Space evaluation. Safe squares behind own pawns weighted by piece presence. Estimate: +10-30 Elo.
-5. Endgame scale factors. Opposite-color bishop drawish scaling, KBN endgames, etc. Estimate: +10-20 Elo.
-6. Re-Texel-tune after each addition.
+5. Initiative / complexity bonus from SF's `winnable()`. Distinct from scale factors and applied **before** mg/eg interpolation: a complexity score from `9 * passed_count + 12 * pawn_count + 9 * outflanking + 21 * pawnsOnBothFlanks + 24 * infiltration + 51 * !nonPawnMaterial - 43 * almostUnwinnable - 110` is added to whichever side is winning (sign of mg/eg), capped so it cannot flip the score sign. Scale factors *shrink* the eg of drawish endgames; the initiative term *amplifies* a balanced eval toward the side with a positional edge. Both terms live in the same SF function but they are independent and were missed when this section was first drafted. Estimate: +20-40 Elo.
+6. Endgame scale factors. Opposite-color bishop drawish scaling, single-flank rook endgames, KBNK, queen-vs-no-queen reductions. Replace BTC's narrow `adjustEndgameEvaluation` (a KRPvKR / KNNK handler currently disabled in `evaluate()`) with SF's `Material::probe`-style dispatch: a small material-key cache returns a per-position scale factor in [0, 96] that scales the eg portion during interpolation. Estimate: +10-20 Elo.
+7. Specialized endgame eval functions. KPK, KRK, KBNK, KBPK, KQKP — hand-coded eval functions that *replace* the general eval when the material configuration is one BTC consistently mis-scores. Different from scale factors, which scale a result; these return a known-correct number. SF keeps these in `endgame.cpp`; BTC has none. Estimate: +10-30 Elo.
+8. Re-Texel-tune after each addition.
 
 ## v2.10 (search second pass with the stronger eval)
 
-A stronger eval signal makes the heuristics that failed in 2.6 work, and unlocks several modern search techniques that depend on a reliable static eval. Items 1-4 are new techniques; items 5-7 are revisits of v2.6 experiments that did not stick on the weaker eval signal; items 8-9 are tuning.
+A stronger eval signal makes the heuristics that failed in 2.6 work, and unlocks several modern search techniques that depend on a reliable static eval. Items 1-4 are new techniques; items 5-8 are revisits of v2.6 experiments that did not stick on the weaker eval signal; items 9-10 are tuning.
 
 1. Correction history. Five small tables (pawn structure, minor-piece config, non-pawn-white, non-pawn-black, continuation) that record the gap between static eval and observed search result, then bias the next static eval by the learned correction. Independent of whether eval is classical or neural. Estimate: +30-60 Elo.
 2. ProbCut. At depth >= 5 with a capture/promotion move, do a reduced search at `beta + ~200` to find moves that almost surely exceed beta, then prune. Estimate: +20-40 Elo.
@@ -79,8 +84,9 @@ A stronger eval signal makes the heuristics that failed in 2.6 work, and unlocks
 5. 2-ply continuation history (revisit from v2.6). Stockfish-shape implementation (symmetric reads of the 1-ply and 2-ply tables, 3/4 update bonus on the 2-ply table) tested neutral on 250 total games at the v2.6 eval signal. Hypothesis is that with the cleaner eval the cutoff signal becomes informative enough that the 2-ply table converges to useful values; revive the `v2.6-2ply-cont-hist` branch and re-test.
 6. Improving heuristic (revisit from v2.6). Now plausibly reliable because eval is less noisy. Likely works with default constants this time.
 7. Best-move stability and fail-low at root in time management (revisit from v2.6). Same reasoning.
-8. Razoring tuning. Texel-tune the razoring margins.
-9. Aspiration window constants. Tune the delta progression.
+8. Internal iterative reductions (revisit from v2.6). The simple `depth--` port lost ~100 Elo on 71 games against the singular-extensions base; the failure mode is likely the lack of node-type / `priorReduction` gating combined with BTC's single-entry TT making "no TT move" a noisy signal. Revive the `v2.6-iir` branch only after correction history or a multi-entry TT lands, and restrict the reduction to non-PV cut-nodes if node-type tracking is available by then.
+9. Razoring tuning. Texel-tune the razoring margins.
+10. Aspiration window constants. Tune the delta progression.
 
 ## v2.x bonus (UCI and features, interleaved when convenient)
 
@@ -91,6 +97,8 @@ Not version-tied. Add as available.
 - Syzygy EGTB. Endgame tablebase lookup. Estimate: +10-30 Elo in tournament play.
 - Opening book support (polyglot). OwnBook UCI option. Estimate: +5-15 Elo in opening phase.
 - Clear Hash button option. UCI button to flush TT mid-session.
+- `TrappedRook` penalty. Rook with `mob <= 3` stuck on the same wing as a king that has lost castling rights. Detection code already drafted but commented out in `evaluateWhite/BlackRook`; needs only the `TrappedRook` constant and uncommenting. Trivial. Estimate: ~+5 Elo.
+- Evaluation grain rounding. `v = (v / 16) * 16` at the end of `evaluate()`. Coarsens the eval so equivalent positions share TT entries more often, raising the cutoff rate. One-liner. Estimate: ~+5 Elo historically.
 
 ## v3.0 (NNUE)
 
@@ -135,7 +143,7 @@ These should land alongside the per-version work.
 
 | Version | New work                                                | Estimated gain vs prior |
 |---------|---------------------------------------------------------|-------------------------|
-| 2.6     | LMP, futility, LMR, aspiration, sort, UCI, singular extensions, counter-move, IIR | +150 confirmed so far on singular extensions alone; +20-40 remaining from counter-move and IIR |
+| 2.6     | LMP, futility, LMR, aspiration, sort, UCI, singular extensions, counter-move | +150 confirmed so far on singular extensions alone; +5-15 remaining from counter-move (IIR tried, regressed, deferred to v2.10) |
 | 2.7     | king safety re-tune, threats activation                 | +100-200                |
 | 2.8     | mobility w/ pin exclusion, attackedBy2, lazy thresholds, Texel pipeline | +100-220 |
 | 2.9     | pawn hash, missing eval terms, retune                   | +60-160                 |
