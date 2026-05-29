@@ -30,8 +30,18 @@ extern int16_t mainHistory[12][64];
 extern int16_t captureHistory[12][64][12];
 
 // 1-ply continuation history [prevPiece][prevTo][piece][to]
-// rewards/punishes a move conditioned on the previous move played.
+// rewards/punishes a move conditioned on the previous move played
+// (most recent move on the stack, i.e., the opponent's last move).
 extern int16_t continuationHistory[12][64][12][64];
+
+// 2-ply continuation history [prev2Piece][prev2To][piece][to]
+// rewards/punishes a move conditioned on the move made 2 plies ago
+// (our own previous move).
+extern int16_t continuationHistory2[12][64][12][64];
+
+// counter-move table [prevPiece][prevTo] -> single quiet move that refuted the
+// previous move. used in quiet move ordering between killers and history.
+extern int counterMoves[12][64];
 
 // stack of moves played to reach each ply, used to index continuation history
 extern int playedMoveStack[maxPly + 1];

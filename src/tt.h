@@ -13,8 +13,19 @@
 <><><><><><><><><><><><><><><><><><><><><><><><>
 ***********************************************/
 
-// number of hash entries
+// number of hash entries (total slots, a multiple of TT_BUCKET_SIZE)
 extern int hashEntries;
+
+// number of buckets. each bucket holds TT_BUCKET_SIZE entries.
+extern int hashBuckets;
+
+// search generation, bumped once per search. used by the bucket replacement
+// policy so stale entries from earlier searches are preferred for eviction.
+extern int ttGeneration;
+
+// entries per bucket. probing scans all entries of one bucket; on a full
+// bucket the lowest depth - 8 * (gen - age) entry is replaced.
+#define TT_BUCKET_SIZE 4
 
 // transposition table structure
 typedef struct
@@ -25,6 +36,7 @@ typedef struct
     int score; // eval
     int move; // move
     int best; // best move in position
+    int age; // ttGeneration at the time this entry was written
 } tt;
 
 // create transposition table
@@ -55,13 +67,17 @@ static inline int probeHash(int alpha, int beta, int depth, int* best,
     *ttFlag  = 0;
     *ttScore = 0;
 
-    // create TT pointer (points to the element of the tt)
-    // since keys are stored using modulo, % should be used to avoid collisions
-    tt *hashEntry = &transpositionTable[hashKey % hashEntries];
+    // base of this position's bucket
+    tt *bucket = &transpositionTable[(hashKey % hashBuckets) * TT_BUCKET_SIZE];
 
-    // check if exact position
-    if (hashEntry->hashKey == hashKey)
+    // scan the bucket for a key match
+    for (int i = 0; i < TT_BUCKET_SIZE; i++)
     {
+        tt *hashEntry = &bucket[i];
+
+        if (hashEntry->hashKey != hashKey)
+            continue;
+
         // raw entry info, mate-adjusted to current ply, exposed unconditionally
         int rawScore = hashEntry->score;
         if (rawScore < -mateScore) rawScore += ply;
@@ -83,46 +99,68 @@ static inline int probeHash(int alpha, int beta, int depth, int* best,
             // match the flag
             // PV node
             if (hashEntry->flag == hashFlagExact)
-            {
-                // return pv score
                 return score;
-            }
             // alpha score (fail low)
             if ((hashEntry->flag == hashFlagAlpha) && (score <= alpha))
-            {
-                // return alpha
                 return alpha;
-            }
             // beta score (fail high)
             if ((hashEntry->flag == hashFlagBeta) && (score >= beta))
-            {
-                // return beta
                 return beta;
-            }
         }
+
+        return noHashEntry;
     }
-    // if no match
+
+    // if no match in the bucket
     return noHashEntry;
 }
 
 // write (record) hash
 static inline void recordHash(int score, int depth, int hashFlag, int move, int best)
 {
-    // create TT pointer (points to the element of the tt)
-    // since keys are stored using modulo, % should be used to avoid collisions
-    tt *hashEntry = &transpositionTable[hashKey % hashEntries];
+    // base of this position's bucket
+    tt *bucket = &transpositionTable[(hashKey % hashBuckets) * TT_BUCKET_SIZE];
+
+    // pick a slot: prefer a key match or an empty slot; otherwise evict the
+    // entry that minimises depth - 8 * (gen - age) (shallow and/or stale).
+    tt *slot = NULL;
+    tt *replace = &bucket[0];
+    for (int i = 0; i < TT_BUCKET_SIZE; i++)
+    {
+        tt *hashEntry = &bucket[i];
+        if (hashEntry->hashKey == hashKey || hashEntry->hashKey == 0)
+        {
+            slot = hashEntry;
+            break;
+        }
+        if (hashEntry->depth - 8 * (ttGeneration - hashEntry->age) <
+            replace->depth - 8 * (ttGeneration - replace->age))
+            replace = hashEntry;
+    }
+    if (slot == NULL)
+        slot = replace;
+
+    // depth-preferred: keep a deeper same-key entry unless this result is exact
+    // or not much shallower. preserve at least the move in that case.
+    if (slot->hashKey == hashKey && hashFlag != hashFlagExact && depth < slot->depth - 3)
+    {
+        if (move) { slot->move = move; slot->best = best; }
+        slot->age = ttGeneration;
+        return;
+    }
 
     // adjust score (for mating scores)
     if (score < -mateScore) score -= ply;
     if (score > mateScore) score += ply;
 
     // write hash entry
-    hashEntry->hashKey = hashKey;
-    hashEntry->score = score;
-    hashEntry->depth = depth;
-    hashEntry->flag = hashFlag;
-    hashEntry->move = move;
-    hashEntry->best = best;
+    slot->hashKey = hashKey;
+    slot->score = score;
+    slot->depth = depth;
+    slot->flag = hashFlag;
+    slot->move = move;
+    slot->best = best;
+    slot->age = ttGeneration;
 }
 
 #endif // TT_H
