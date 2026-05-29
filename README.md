@@ -1,7 +1,8 @@
 
 <div align="center">
-  <img src="logo.png" alt="BetterThanCris" width="150">
+  <img src="logo.png" alt="BetterThanCris" width="200">
   <h3>BetterThanCris Chess Bot</h3>
+	Last Release v2.6 - 29/05/2026
 </div>
 
 ---
@@ -25,7 +26,7 @@
 **Version 2.6**
 - [CCRL](https://www.computerchess.org.uk/ccrl/404/) Blitz Rating [Estimate](https://docs.google.com/spreadsheets/d/1t2gDEfoMDtqAA5uL9U_GPA9CijjlMrVK4AR4DiAqqGU/edit?usp=sharing): 2487 ± 36
 - [Lichess](https://lichess.org/@/BetterThanCris) (Playing Almost Exclusively Against Other Bots):
-	- Bullet: TBD Peak, Blitz: TBD Peak
+	- Bullet: 2414 Peak, Blitz: 2267 Peak
 - Against Humans, Especially in Bullet or Blitz, Rating can be Expected to be Higher
 - [Sample Games](https://www.chess.com/analysis/collection/betterthancris-2-6-samples-games-3AxpF6QA2)
 
