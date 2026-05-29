@@ -40,6 +40,7 @@
 - Time Management:
 	- Soft Target / Hard Cap Split
 	- Skip Iterations That Cannot Finish in Budget
+	- Best-Move-Stability Shrink + Fail-Low Extension
 - Perft Test
 	 
  **Search:**
@@ -61,6 +62,8 @@
  - Frontier Futility Pruning (Quiet Moves at Low Depth)
  - Late Move Pruning (LMP)
  - Razoring
+ - Internal Iterative Reductions (IIR)
+ - Improving Heuristic (Gates LMP / RFP / LMR by `eval[ply] > eval[ply-2]`)
  - Late Move Reductions (LMR):
 	- Ethereal-Style Formula
 	- History-Based Reduction Adjustment
@@ -73,9 +76,12 @@
 	- Main History (Quiet Moves)
 	- Capture History (By Captured Piece)
 	- 1-Ply Continuation History
+	- 2-Ply Continuation History
 	- Carryover Across Moves Within a Game
  - Killer Moves
- - Transposition Table w/ Zobrist Hashing
+ - Counter-Move Heuristic
+ - Transposition Table w/ Zobrist Hashing:
+	- 4-Entry Buckets w/ Depth-Preferred + Generation-Aged Replacement
  - Hash Move Ordering
  - Repetitions
  - Single-Legal-Move Fast Path
@@ -98,16 +104,9 @@
 ## To Do
 
 **Search (High Impact):**
-- Improve Transposition Table
-	- Depth-Preferred Replacement w/ Generation Tracking
-	- Multi-Entry Buckets (Needs Instrumented Cutoff Logging - First Attempt Regressed)
-- Re-attempt Improving Heuristic
-	- Milder Constants Than Stockfish Default (Our Eval Signal Is Noisier)
-- Re-attempt Best-Move Stability Time Use
-	- Higher Threshold and Milder Shrink Factor
-- Counter-Move Heuristic
-- 2-Ply Continuation History
-	- Stockfish-Shape Implementation Tested Neutral on 250 Games at Current Eval; Deferred to Future Eval
+- Correction History
+- ProbCut
+- Pawn History / Low-Ply History
 - Razoring Tuning
 
 **Evaluation (High Impact):**
@@ -140,7 +139,7 @@
  - If online, can be played on  [Lichess](https://lichess.org/@/BetterThanCris) 
  - Can also be downloaded and ran like a normal UCI engine locally on a GUI
 ## Releases
-**Version 2.6 - WIP**
+**Version 2.6 - 29/05/2026**
 - Added Late Move Pruning (LMP):
 	- Skip Quiet Moves Once `movesSearched >= 3 + depth*depth` at depth <= 8
 	- Only at Non-PV, Non-Check, Non-Check-Giving Nodes With a Real Alpha Baseline
@@ -162,14 +161,14 @@
 	- Conditions: depth >= 8, ttDepth >= depth - 3, Beta/Exact Flag, Non-Mate ttScore
 	- singularBeta = ttScore - 2 * depth, Verifier at (depth - 1) / 2 with All Pruning Disabled
 	- Effect: 71.1% Score Over the Pre-Singular 2.6 Build (22W 20D 3L Over 45 Games)
-- Tried and Reverted/Deferred (Can Revisit):
-	- Improving Heuristic (Stockfish-Style LMP/Futility/LMR Gates by `eval[ply] > eval[ply-2]`)
-		- 45.5% Score; LMP Threshold Halving on Not-Improving Too Aggressive for Our Eval Signal
-	- Best-Move Stability + Fail-Low Time Adjustment
-		- 51.0% Score; 70% Soft-Limit Shrink Was Too Aggressive
-	- 2-Ply Continuation History (Stockfish-Shape: Symmetric Reads, 3/4 Update Bonus on 2-Ply Table)
-		- 49.0% Score on Both a 150-Game Match and a 100-Game Tuned-Variant Rematch
-		- Not a Regression but Not a Confirmed Gain; Deferred to v2.10 With Stronger Eval Signal
+- Added Counter-Move Heuristic, 2-Ply Continuation History, Internal Iterative Reductions, Improving Heuristic, Best-Move-Stability Time Management, and TT 4-Entry Buckets:
+	- Counter-Move: `[prevPiece][prevTo]` Refutation Table, Ordered Between Killers and History
+	- 2-Ply Continuation History: Symmetric Reads, 3/4 Update Bonus on the 2-Ply Table
+	- Internal Iterative Reductions (IIR): `depth--` at depth >= 6 With No TT Move
+	- Improving Heuristic: `eval[ply] > eval[ply-2]` Gates the LMP Threshold, RFP Margin, and LMR
+	- Best-Move-Stability Time Management: 70% Soft-Limit Shrink at 5+ Stable Best-Moves, +30% Extension on a >= 50cp Drop
+	- TT 4-Entry Buckets: Depth-Preferred + Generation-Aged Replacement (`depth - 8 * (gen - age)`)
+	- Effect: 64% Score (35W 58D 7L Over 100 Games) vs the Pre-Batch 2.6 Build
 
 **Version 2.5 - 24/05/2026**
 - Added Static Exchange Evaluation (SEE):
