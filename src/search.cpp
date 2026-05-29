@@ -52,10 +52,19 @@ int killerMoves[2][maxPly];
 int16_t mainHistory[12][64];
 int16_t captureHistory[12][64][12];
 int16_t continuationHistory[12][64][12][64];
+int16_t continuationHistory2[12][64][12][64];
+
+// counter-move table [prevPiece][prevTo]. carries across moves like history.
+int counterMoves[12][64];
 
 // move that led to each ply. playedMoveStack[ply] is the move just made to
 // reach the position at search ply == ply. used for continuation history.
 int playedMoveStack[maxPly + 1];
+
+// static eval recorded per ply, used by the improving heuristic. EVAL_NONE
+// marks plies where we were in check (no usable static eval).
+#define EVAL_NONE 100000
+int staticEvalStack[maxPly + 1];
 
 // PV length [ply]
 int PVLength[maxPly];
@@ -77,6 +86,7 @@ int followPV, scorePV;
 #define SCORE_GOOD_CAPTURE  1000000
 #define SCORE_KILLER_1      800000
 #define SCORE_KILLER_2      700000
+#define SCORE_COUNTER       600000
 #define SCORE_BAD_CAPTURE   (-1000000)
 
 // reset all search-side heuristics. called at engine init and on ucinewgame.
@@ -86,6 +96,8 @@ void clearSearchHeuristics()
     memset(mainHistory, 0, sizeof(mainHistory));
     memset(captureHistory, 0, sizeof(captureHistory));
     memset(continuationHistory, 0, sizeof(continuationHistory));
+    memset(continuationHistory2, 0, sizeof(continuationHistory2));
+    memset(counterMoves, 0, sizeof(counterMoves));
     memset(playedMoveStack, 0, sizeof(playedMoveStack));
 }
 
@@ -148,6 +160,38 @@ static inline void updateContHist(int currentMove, int bonus)
     updateHistoryEntry(&continuationHistory[getPiece(prev)][getTarget(prev)]
                                             [getPiece(currentMove)][getTarget(currentMove)],
                        bonus);
+}
+
+// 2-ply continuation history lookup. indexed by the move played 2 plies ago
+// (our own previous move). returns 0 when there is no such move yet.
+static inline int getContHist2(int currentMove)
+{
+    if (ply < 2) return 0;
+    int prev2 = playedMoveStack[ply - 1];
+    if (prev2 == 0) return 0;
+    return continuationHistory2[getPiece(prev2)][getTarget(prev2)]
+                               [getPiece(currentMove)][getTarget(currentMove)];
+}
+
+// update 2-ply continuation history for the current move at ply
+static inline void updateContHist2(int currentMove, int bonus)
+{
+    if (ply < 2) return;
+    int prev2 = playedMoveStack[ply - 1];
+    if (prev2 == 0) return;
+    updateHistoryEntry(&continuationHistory2[getPiece(prev2)][getTarget(prev2)]
+                                             [getPiece(currentMove)][getTarget(currentMove)],
+                       bonus);
+}
+
+// counter-move lookup. returns the stored refutation of the move that led to
+// this node (opponent's last move), or 0 when none.
+static inline int getCounterMove()
+{
+    if (ply <= 0) return 0;
+    int prev = playedMoveStack[ply];
+    if (prev == 0) return 0;
+    return counterMoves[getPiece(prev)][getTarget(prev)];
 }
 
 // enable pv move scoring
@@ -237,8 +281,15 @@ static inline int scoreMove(int move)
     if (killerMoves[1][ply] == move)
         return SCORE_KILLER_2;
 
+    // counter-move: refutation of the opponent's last move, ordered just below
+    // killers and above the history-scored remainder.
+    if (getCounterMove() == move)
+        return SCORE_COUNTER;
+
     // history-based scoring for quiet moves
-    return mainHistory[getPiece(move)][getTarget(move)] + getContHist(move);
+    return mainHistory[getPiece(move)][getTarget(move)]
+           + getContHist(move)
+           + getContHist2(move);
 }
 
 // sort moves (for better pruning). TT best move is bumped to top.
@@ -483,10 +534,25 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
     int legalMoves = 0;
     int eval = evaluate();
 
-    // reverse futility pruning (skip during singular verification)
+    // improving heuristic. compare this node's static eval to our own static
+    // eval two plies ago (falling back to four plies). improving = the eval is
+    // trending up for us, which lets the pruning heuristics below be more
+    // aggressive when it is not. in check there is no usable static eval.
+    staticEvalStack[ply] = inCheck ? EVAL_NONE : eval;
+    int improving = 0;
+    if (!inCheck)
+    {
+        if (ply >= 2 && staticEvalStack[ply - 2] != EVAL_NONE)
+            improving = eval > staticEvalStack[ply - 2];
+        else if (ply >= 4 && staticEvalStack[ply - 4] != EVAL_NONE)
+            improving = eval > staticEvalStack[ply - 4];
+    }
+
+    // reverse futility pruning (skip during singular verification). margin
+    // shrinks when improving so a rising eval prunes one depth's worth sooner.
 	if (excludedMove == 0 && depth < 3 && !pvNode && !inCheck && abs(beta) < mateScore)
 	{
-		int evalMargin = 120 * depth;
+		int evalMargin = 120 * (depth - improving);
 		if (eval - evalMargin >= beta)
 			return eval - evalMargin;
 	}
@@ -549,6 +615,13 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
             }
         }
 	}
+
+    // Internal iterative reductions. With no TT move at sufficient depth,
+    // shrink depth by 1 so this iteration is cheap and populates the TT;
+    // the next iteration then searches with proper move ordering. Mutually
+    // exclusive with singular extensions, which require a TT move.
+    if (excludedMove == 0 && ply > 0 && depth >= 6 && bestMove == 0)
+        depth--;
 
     moves moveList[1];
     generateMoves(moveList);
@@ -658,9 +731,10 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
             && abs(alpha) < mateScore)
         {
             // LMP: at shallow depths, drop quiet moves after we have searched
-            // enough of them. lmpThreshold grows with depth so we are more
-            // permissive deeper in the tree.
-            if (depth <= 8 && movesSearched >= 3 + depth * depth)
+            // enough of them. the threshold grows with depth so we are more
+            // permissive deeper in the tree, and halves when not improving so
+            // a falling eval prunes the late quiets sooner.
+            if (depth <= 8 && movesSearched >= (3 + depth * depth) / (2 - improving))
             {
                 ply--;
                 repetitionIndex--;
@@ -708,12 +782,20 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
                     double depthAdjustment = 0.7844 + std::log(depth) * std::log(movesSearched) / 2.4696;
                     int reduction = (int)depthAdjustment;
 
-                    // history adjustment. mainHistory + 1-ply continuation
-                    // history are each bounded to roughly +- HIST_MAX, so the
-                    // combined score is in [-16384, +16384] and divides cleanly
-                    // by 4096 to give a +- 4 ply reduction nudge.
-                    int histScore = mainHistory[getPiece(move)][getTarget(move)] + getContHist(move);
+                    // history adjustment. mainHistory + 1-ply + 2-ply
+                    // continuation history, each bounded to roughly +- HIST_MAX.
+                    // divisor kept at 4096 (matching Stockfish, which adds more
+                    // history sources without rescaling the LMR divisor) so the
+                    // larger sum can shift LMR more on strongly-good or
+                    // strongly-bad quiet moves.
+                    int histScore = mainHistory[getPiece(move)][getTarget(move)]
+                                    + getContHist(move)
+                                    + getContHist2(move);
                     reduction -= histScore / 4096;
+
+                    // reduce one extra ply when our eval is not improving
+                    if (!improving)
+                        reduction++;
 
                     // do not reduce quiet check-givers as hard
                     if (opponentInCheck)
@@ -807,14 +889,27 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
                         killerMoves[0][ply] = move;
                     }
 
+                    // record this quiet as the counter-move to the opponent's
+                    // last move (the move that led to this node).
+                    int prevMove = (ply > 0) ? playedMoveStack[ply] : 0;
+                    if (prevMove != 0)
+                        counterMoves[getPiece(prevMove)][getTarget(prevMove)] = move;
+
+                    // 2-ply bonus scaled 3/4 vs 1-ply, matching Stockfish's
+                    // 780/1040 weighting between (ss-1) and (ss-2) entries. the
+                    // 2-ply signal is noisier so it accumulates more slowly.
+                    int bonus2 = bonus * 3 / 4;
+
                     updateHistoryEntry(&mainHistory[getPiece(move)][getTarget(move)], bonus);
                     updateContHist(move, bonus);
+                    updateContHist2(move, bonus2);
 
                     for (int i = 0; i < quietsCount - 1; i++)
                     {
                         int badMove = quietsTried[i];
                         updateHistoryEntry(&mainHistory[getPiece(badMove)][getTarget(badMove)], -bonus);
                         updateContHist(badMove, -bonus);
+                        updateContHist2(badMove, -bonus2);
                     }
                 }
 
@@ -860,6 +955,11 @@ void search(int depth)
     memset(PVTable, 0, sizeof(PVTable));
     memset(PVLength, 0, sizeof(PVLength));
     memset(playedMoveStack, 0, sizeof(playedMoveStack));
+    memset(staticEvalStack, 0, sizeof(staticEvalStack));
+
+    // bump TT generation so this search's stores are preferred over stale
+    // entries from previous searches by the bucket replacement policy.
+    ttGeneration++;
 
     // single-legal-move fast path. if there is only one legal reply, play it
     // immediately without searching. saves clock time in forced positions.
@@ -895,6 +995,15 @@ void search(int depth)
     int alpha = -infinity;
     int beta = infinity;
 
+    // best-move stability time management. when the root best move has been
+    // unchanged for several iterations we shrink the soft limit (the position
+    // is settled, spend less). when the score just dropped sharply we extend
+    // it (something went wrong, keep looking).
+    int prevBest = 0;
+    int prevScore = 0;
+    int stableCount = 0;
+    int scoreDrop = 0;
+
     for (int currentDepth = 1; currentDepth <= depth; currentDepth++)
     {
         if (stopped == 1)
@@ -905,10 +1014,15 @@ void search(int depth)
         // typically take roughly twice as long as the previous one, so
         // crossing this threshold means the next iteration is unlikely to
         // finish within stoptime and we would just abort partway through.
-        if (timeset && currentDepth > 1 && softLimit > 0 &&
-            (getTime() - starttime) * 2 > softLimit)
+        if (timeset && currentDepth > 1 && softLimit > 0)
         {
-            break;
+            int adjustedSoft = softLimit;
+            if (stableCount >= 5)
+                adjustedSoft = adjustedSoft * 70 / 100;
+            if (scoreDrop)
+                adjustedSoft = adjustedSoft * 130 / 100;
+            if ((getTime() - starttime) * 2 > adjustedSoft)
+                break;
         }
 
         followPV = 1;
@@ -987,6 +1101,18 @@ void search(int depth)
             }
             printf("\n");
         }
+
+        // update best-move stability bookkeeping for the next iteration's
+        // time decision. a sharp score drop (>= 50cp) flags trouble; an
+        // unchanged root best move counts toward stability.
+        int curBest = PVTable[0][0];
+        scoreDrop = (currentDepth > 1 && score < prevScore - 50);
+        if (currentDepth > 1 && curBest == prevBest)
+            stableCount++;
+        else
+            stableCount = 0;
+        prevBest  = curBest;
+        prevScore = score;
     }
 
     printf("bestmove ");
