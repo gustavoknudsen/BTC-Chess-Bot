@@ -28,12 +28,13 @@
 	- Bullet: TBD Peak, Blitz: TBD Peak
 - Against Humans, Especially in Bullet or Blitz, Rating can be Expected to be Higher
 - [Sample Games](https://www.chess.com/analysis/collection/betterthancris-2-6-samples-games-3AxpF6QA2)
+
 **Version 2.3**
 - [CCRL](https://www.computerchess.org.uk/ccrl/404/) Blitz Rating [Estimate](https://docs.google.com/spreadsheets/d/1t2gDEfoMDtqAA5uL9U_GPA9CijjlMrVK4AR4DiAqqGU/edit?usp=sharing): 2071 ± 20
 - [Lichess](https://lichess.org/@/BetterThanCris) (Playing Almost Exclusively Against Other Bots):
 	- Bullet: 2301 Peak, Blitz: 2267 Peak
 - Against Humans, Especially in Bullet or Blitz, Rating can be Expected to be Higher
-- [Sample Games](https://www.chess.com/c/2j3KdGsGr)
+- [Sample Games](https://www.chess.com/analysis/collection/betterthancris-2-6-samples-games-3AxpF6QA2)
 ## Features
  **General Features:**
  - UCI Protocol
