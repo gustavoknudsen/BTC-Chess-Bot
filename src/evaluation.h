@@ -602,6 +602,137 @@ inline kingShelter getKingSafety(int currentSide)
     return shelter;
 }
 
+// Stockfish-style king danger. Builds kingDanger as a sum of small contributions
+// (attacker weight, weak king-ring squares, safe and unsafe checks, pinned pieces,
+// king-flank pressure, no-enemy-queen bonus, knight defense, shelter feedback) and
+// transforms it into a quadratic penalty. Returns the mg/eg penalty to subtract from
+// side `us`. shelterMg is the mg shelter score already computed by getKingSafety.
+// The mobility-differential contribution is omitted until v2.8 mobility lands.
+static inline kingShelter getKingDanger(int us, int shelterMg)
+{
+    int them = 1 - us;
+    int ksq = getLSFBIndex(bitboards[(us == white) ? K : k]);
+    U64 ownQueen = bitboards[(us == white) ? Q : q];
+
+    U64 ourAll   = pieceAttackTables[us][allPieces];
+    U64 theirAll = pieceAttackTables[them][allPieces];
+
+    // Squares around our king the enemy attacks and we defend at most once (king/queen only).
+    U64 weakSquares = theirAll
+                    & ~attackedBy2[us]
+                    & (~ourAll | pieceAttackTables[us][K] | pieceAttackTables[us][Q]);
+
+    // Squares from which an enemy check would be safe.
+    U64 safeSquares = ~occupancies[them]
+                    & (~ourAll | (weakSquares & attackedBy2[them]));
+
+    // Slider check rays from our king, treating our own queen as transparent.
+    U64 occ = occupancies[both] ^ ownQueen;
+    U64 rookRays   = getRookAttacks(ksq, occ);
+    U64 bishopRays = getBishopAttacks(ksq, occ);
+
+    U64 unsafeChecks = 0ULL;
+    int kingDanger = 0;
+
+    // Enemy rook checks
+    U64 rookChecks = rookRays & pieceAttackTables[them][R] & safeSquares;
+    if (rookChecks)
+        kingDanger += SafeCheck[R][countBits(rookChecks) > 1];
+    else
+        unsafeChecks |= rookRays & pieceAttackTables[them][R];
+
+    // Enemy queen checks, but only from squares that cannot give a rook check
+    U64 queenChecks = (rookRays | bishopRays) & pieceAttackTables[them][Q] & safeSquares
+                    & ~(pieceAttackTables[us][Q] | rookChecks);
+    if (queenChecks)
+        kingDanger += SafeCheck[Q][countBits(queenChecks) > 1];
+
+    // Enemy bishop checks, but only from squares that cannot give a queen check
+    U64 bishopChecks = bishopRays & pieceAttackTables[them][B] & safeSquares & ~queenChecks;
+    if (bishopChecks)
+        kingDanger += SafeCheck[B][countBits(bishopChecks) > 1];
+    else
+        unsafeChecks |= bishopRays & pieceAttackTables[them][B];
+
+    // Enemy knight checks
+    U64 knightChecks = knightAttacks[ksq] & pieceAttackTables[them][N];
+    if (knightChecks & safeSquares)
+        kingDanger += SafeCheck[N][countBits(knightChecks & safeSquares) > 1];
+    else
+        unsafeChecks |= knightChecks;
+
+    // King ring: king area clamped to b2-g7, minus squares our own two pawns defend.
+    int kf = clamp(ksq, b1, g1);
+    int krIdx = getRank[ksq];
+    if (krIdx < 1) krIdx = 1; else if (krIdx > 6) krIdx = 6;
+    int ringSq = (7 - krIdx) * 8 + kf;
+    U64 kingRing = (kingAttacks[ringSq] | (1ULL << ringSq)) & ~pawnDoubleTables[us];
+
+    // King-flank pressure
+    U64 flank = kingFlankMask[getFile[ksq]] & campMask[us];
+    U64 flankAtk = theirAll & flank;
+    int kingFlankAttack  = countBits(flankAtk) + countBits(flankAtk & attackedBy2[them]);
+    int kingFlankDefense = countBits(ourAll & flank);
+
+    AttackInfo info = getAttackInfo(us);
+    int hasEnemyQueen = countBits(bitboards[(us == white) ? q : Q]) > 0;
+    int knightDefense = bool(pieceAttackTables[us][N] & pieceAttackTables[us][K]);
+
+    // Pieces (either color) blocking an enemy slider attack on our king (slider-blocker
+    // scan inspired by Stockfish: snipers see the king with the board cleared, then a
+    // single piece on the squares between king and sniper is a blocker).
+    U64 enemyRooksQueens   = bitboards[(us == white) ? r : R] | bitboards[(us == white) ? q : Q];
+    U64 enemyBishopsQueens = bitboards[(us == white) ? b : B] | bitboards[(us == white) ? q : Q];
+    U64 snipers = (getRookAttacks(ksq, 0ULL) & enemyRooksQueens)
+                | (getBishopAttacks(ksq, 0ULL) & enemyBishopsQueens);
+    U64 sniperOcc = occupancies[both] ^ snipers;
+    U64 blockersBB = 0ULL;
+    while (snipers)
+    {
+        int sniperSq = getLSFBIndex(snipers);
+        U64 b = betweenMask[ksq][sniperSq] & sniperOcc;
+        if (b && (b & (b - 1)) == 0)
+            blockersBB |= b;
+        popBit(snipers, sniperSq);
+    }
+    int blockers = countBits(blockersBB);
+
+    kingDanger += info.numberAttackers * info.valueAttacks
+                + 183 * countBits(kingRing & weakSquares)
+                + 148 * countBits(unsafeChecks)
+                +  98 * blockers
+                +  69 * info.numberAttacks
+                +   3 * kingFlankAttack * kingFlankAttack / 8
+                - 873 * !hasEnemyQueen
+                - 100 * knightDefense
+                -   6 * shelterMg / 8
+                -   4 * kingFlankDefense
+                +  37;
+
+    kingShelter penalty;
+    penalty.mgBonus = 0;
+    penalty.egBonus = 0;
+
+    if (kingDanger > 100)
+    {
+        penalty.mgBonus = kingDanger * kingDanger / 4096;
+        penalty.egBonus = kingDanger / 16;
+    }
+
+    // Pawnless king flank (penalty applies regardless of the kingDanger threshold)
+    if (!((bitboards[P] | bitboards[p]) & kingFlankMask[getFile[ksq]]))
+    {
+        penalty.mgBonus += PawnlessFlank[0];
+        penalty.egBonus += PawnlessFlank[1];
+    }
+
+    // Linear penalty for attacks in the king flank
+    penalty.mgBonus += FlankAttacks[0] * kingFlankAttack;
+    penalty.egBonus += FlankAttacks[1] * kingFlankAttack;
+
+    return penalty;
+}
+
 // Helper function to get piece type at a square
 int getPieceType(int square, int side);
 
@@ -1588,31 +1719,13 @@ static inline int evaluateWhiteKing(int square, int stage, int stageScore)
     // Position score
     score += getPositionScore(K, square, stage, stageScore);
 
-    // King safety evaluation
-    int kingPenalty = 0;
-    AttackInfo info = getAttackInfo(white);
-
-    int weakCount = countBits(whiteKingZoneMask[square] & weak[white]);
-    int minorDefenseN = bool(pieceAttackTables[white][N] & pieceAttackTables[white][K]);
-    int minorDefenseB = bool(pieceAttackTables[white][B] & pieceAttackTables[white][K]);
-    int hasQueen = countBits(bitboards[q]);
-
-    kingPenalty += info.numberAttackers * info.valueAttacks
-                   + 69 * info.numberAttacks
-                   + 183 * weakCount
-                   - 100 * minorDefenseN
-                   - 35 * minorDefenseB
-                   - 873 * !hasQueen
-                   - 7;
-
-    // Transform king penalty
-    if (kingPenalty > 100) {
-        score -= interpolate(kingPenalty * kingPenalty / 4096, kingPenalty / 16, stageScore);
-    }
-
-    // King shelter
+    // King shelter and pawn storm
     kingShelter bonus = getKingSafety(white);
     score += interpolate(bonus.mgBonus, bonus.egBonus, stageScore);
+
+    // King danger penalty (sum-of-contributions, Stockfish style)
+    kingShelter danger = getKingDanger(white, bonus.mgBonus);
+    score -= interpolate(danger.mgBonus, danger.egBonus, stageScore);
     /*
     // Bonus for king attacking weak enemy pieces
     U64 KingAttacks = kingAttacks[square];
@@ -1655,33 +1768,13 @@ static inline int evaluateBlackKing(int square, int stage, int stageScore)
     // Position score
     score -= getPositionScore(K, mirrorScore[square], stage, stageScore);
 
-    // King safety evaluation
-    int kingPenalty = 0;
-    AttackInfo info = getAttackInfo(black);
-
-    int weakSquares = countBits(blackKingZoneMask[square] & weak[black]);
-    int knightBonus = bool(pieceAttackTables[black][N] & pieceAttackTables[black][K]);
-    int bishopBonus = bool(pieceAttackTables[black][B] & pieceAttackTables[black][K]);
-    int noQueen = !countBits(bitboards[Q]);
-
-    kingPenalty += info.numberAttackers * info.valueAttacks
-                   + 69 * info.numberAttacks
-                   + 183 * weakSquares
-                   - 100 * knightBonus
-                   - 35 * bishopBonus
-                   - 873 * noQueen
-                   - 7;
-
-    // Transform king penalty
-    if (kingPenalty > 100) {
-        int quadratic = kingPenalty * kingPenalty / 4096;
-        int linear = kingPenalty / 16;
-        score += interpolate(quadratic, linear, stageScore);
-    }
-
-    // King shelter
+    // King shelter and pawn storm
     kingShelter bonus = getKingSafety(black);
     score -= interpolate(bonus.mgBonus, bonus.egBonus, stageScore);
+
+    // King danger penalty (sum-of-contributions, Stockfish style)
+    kingShelter danger = getKingDanger(black, bonus.mgBonus);
+    score += interpolate(danger.mgBonus, danger.egBonus, stageScore);
     /*
     // Bonus for king attacking weak enemy pieces
     U64 KingAttacks = kingAttacks[square];

@@ -66,7 +66,11 @@ extern const int mobilityBonus[6][32][2];
 // attacking king zone attack weight table [piece number]
 extern const int attackWeight[8];
 
-extern const int KingAttackValues[6];
+// king attack weight by attacker piece type, indexed by piece enum {P,N,B,R,Q,K}
+extern const int KingAttackWeights[6];
+
+// safe-check bonus added to kingDanger, [attacker piece type][single=0/multiple=1]
+extern const int SafeCheck[6][2];
 
 // tempo bonus
 extern const int tempoBonus;

@@ -219,6 +219,9 @@ U64 fileMask[64];
 U64 centerFiles = 0ULL;
 U64 outpostRanksWhite = 0ULL;
 U64 outpostRanksBlack = 0ULL;
+U64 kingFlankMask[8] = {0ULL};
+U64 campMask[2] = {0ULL};
+U64 betweenMask[64][64] = {{0ULL}};
 
 //  isolated pawn mask bitboard
 U64 isolatedMask[64];

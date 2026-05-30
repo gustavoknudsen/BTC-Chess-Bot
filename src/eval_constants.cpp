@@ -169,7 +169,18 @@ extern const int mobilityBonus[6][32][2] =
 // attacking king zone attack weight table [piece number]
 extern const int attackWeight[8] = {0, 0, 50, 75, 88, 94, 97, 99};
 
-extern const int KingAttackValues[6] = { 0, 0, 77, 55, 44, 10 };
+// indexed by BTC piece enum {P,N,B,R,Q,K}; values from old Stockfish KingAttackWeights
+extern const int KingAttackWeights[6] = { 0, 76, 46, 45, 14, 0 };
+
+// safe-check bonus by attacker type {P,N,B,R,Q,K} x {single, multiple}, from old Stockfish SafeCheck
+extern const int SafeCheck[6][2] = {
+    {   0,    0 },
+    { 805, 1292 },  // knight
+    { 650,  984 },  // bishop
+    {1071, 1886 },  // rook
+    { 730, 1128 },  // queen
+    {   0,    0 }
+};
 
 // tempo bonus
 extern const int tempoBonus = 28;

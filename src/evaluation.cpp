@@ -390,6 +390,46 @@ void initEvalMasks()
     centerFiles = fileMask[c1] | fileMask[d1] | fileMask[e1] | fileMask[f1];
     outpostRanksWhite = rankMask[a4] | rankMask[a5] | rankMask[a6];
     outpostRanksBlack = rankMask[a5] | rankMask[a4] | rankMask[a3];
+
+    // king-flank file groups
+    U64 fA = fileMask[a1], fB = fileMask[b1], fC = fileMask[c1], fD = fileMask[d1];
+    U64 fE = fileMask[e1], fF = fileMask[f1], fG = fileMask[g1], fH = fileMask[h1];
+    U64 qSide = fA | fB | fC | fD, kSide = fE | fF | fG | fH, cFiles = fC | fD | fE | fF;
+    kingFlankMask[0] = qSide ^ fD;   // a-file king: files a-c
+    kingFlankMask[1] = qSide;
+    kingFlankMask[2] = qSide;
+    kingFlankMask[3] = cFiles;
+    kingFlankMask[4] = cFiles;
+    kingFlankMask[5] = kSide;
+    kingFlankMask[6] = kSide;
+    kingFlankMask[7] = kSide ^ fE;   // h-file king: files f-h
+
+    // per-side camp: own half plus the middle rank, excluding the enemy's back three ranks
+    campMask[white] = 0ULL;
+    campMask[black] = 0ULL;
+    for (int sq = 0; sq < 64; sq++)
+    {
+        int r = getRank[sq];        // 0 = rank 1, 7 = rank 8
+        if (r <= 4) campMask[white] |= (1ULL << sq);   // ranks 1-5
+        if (r >= 3) campMask[black] |= (1ULL << sq);   // ranks 4-8
+    }
+
+    // precompute strictly-between masks for fast blocker/pin detection. Built from magic
+    // slider attacks (orientation agnostic): the squares both endpoints can see when each
+    // is blocked by the other are exactly the squares strictly between them.
+    for (int s1 = 0; s1 < 64; s1++)
+    {
+        for (int s2 = 0; s2 < 64; s2++)
+        {
+            U64 b1 = 1ULL << s1, b2 = 1ULL << s2;
+            if (getBishopAttacks(s1, 0ULL) & b2)
+                betweenMask[s1][s2] = getBishopAttacks(s1, b2) & getBishopAttacks(s2, b1);
+            else if (getRookAttacks(s1, 0ULL) & b2)
+                betweenMask[s1][s2] = getRookAttacks(s1, b2) & getRookAttacks(s2, b1);
+            else
+                betweenMask[s1][s2] = 0ULL;
+        }
+    }
 }
 
 // scale attacks on king based off of attack value and number of attackers
@@ -449,7 +489,7 @@ AttackInfo getAttackInfo(int kingSide)
             info.numberAttacks += count;
             if (overlap)
             {
-                info.valueAttacks += KingAttackValues[N];
+                info.valueAttacks += KingAttackWeights[N];
                 info.numberAttackers++;
             }
             // pop bit
@@ -472,7 +512,7 @@ AttackInfo getAttackInfo(int kingSide)
 
             if (overlap)
             {
-                info.valueAttacks += KingAttackValues[B];
+                info.valueAttacks += KingAttackWeights[B];
                 info.numberAttackers++;
             }
 
@@ -496,7 +536,7 @@ AttackInfo getAttackInfo(int kingSide)
 
             if (overlap)
             {
-                info.valueAttacks += KingAttackValues[R];
+                info.valueAttacks += KingAttackWeights[R];
                 info.numberAttackers++;
             }
 
@@ -520,7 +560,7 @@ AttackInfo getAttackInfo(int kingSide)
 
             if (overlap)
             {
-                info.valueAttacks += KingAttackValues[Q];
+                info.valueAttacks += KingAttackWeights[Q];
                 info.numberAttackers++;
             }
 
@@ -550,7 +590,7 @@ AttackInfo getAttackInfo(int kingSide)
 
             if (overlap)
             {
-                info.valueAttacks += KingAttackValues[N];
+                info.valueAttacks += KingAttackWeights[N];
                 info.numberAttackers++;
             }
             // pop bit
@@ -573,7 +613,7 @@ AttackInfo getAttackInfo(int kingSide)
 
             if (overlap)
             {
-                info.valueAttacks += KingAttackValues[B];
+                info.valueAttacks += KingAttackWeights[B];
                 info.numberAttackers++;
             }
 
@@ -597,7 +637,7 @@ AttackInfo getAttackInfo(int kingSide)
 
             if (overlap)
             {
-                info.valueAttacks += KingAttackValues[R];
+                info.valueAttacks += KingAttackWeights[R];
                 info.numberAttackers++;
             }
 
@@ -621,7 +661,7 @@ AttackInfo getAttackInfo(int kingSide)
 
             if (overlap)
             {
-                info.valueAttacks += KingAttackValues[Q];
+                info.valueAttacks += KingAttackWeights[Q];
                 info.numberAttackers++;
             }
 
