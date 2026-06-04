@@ -266,124 +266,84 @@ static inline int interpolate(int openingValue, int endgameValue, int stageScore
     return (openingValue * stageScore + endgameValue * (openingPhaseScore - stageScore)) / openingPhaseScore;
 }
 
-void initPositionCache();
+// Pieces (either colour) pinned to side `us`'s king: a single piece on the squares
+// strictly between the king and an enemy slider that x-rays the king. Computed once per
+// node from precomputed betweenMask; no per-square ray walking.
+static inline U64 computeKingBlockers(int us) {
+    int ksq = getLSFBIndex(bitboards[(us == white) ? K : k]);
+    U64 enemyRooksQueens   = bitboards[(us == white) ? r : R] | bitboards[(us == white) ? q : Q];
+    U64 enemyBishopsQueens = bitboards[(us == white) ? b : B] | bitboards[(us == white) ? q : Q];
 
-void calculateExclusionMasks(U64 *regularMask, U64 *queenMask);
+    U64 snipers = (getRookAttacks(ksq, 0ULL) & enemyRooksQueens)
+                | (getBishopAttacks(ksq, 0ULL) & enemyBishopsQueens);
+    U64 occ = occupancies[both] ^ snipers;
 
-void updatePositionCache();
-
-// Get all pinned pieces for the current position
-U64 getPinnedPieces(int side);
-
-// Get the pin ray for a specific pinned piece
-U64 getPinRay(int kingSquare, int pinnedSquare);
-
-U64 getRayBetween(int square1, int square2);
-
-// get piece mobility
-static inline int getMobility(int piece, int squarePiece) {
-    // Update cache if needed
-    updatePositionCache();
-
-    // Get basic attack bitboard
-    U64 mobilityBB = 0;
-
-    // Choose the appropriate exclusion mask
-    U64 excludeMask = (piece == Q || piece == q) ?
-                      positionCache.queenExcludeMask :
-                      positionCache.regularExcludeMask;
-
-    switch (piece) {
-        case N: case n:
-            mobilityBB = knightAttacks[squarePiece] & ~occupancies[side];
-            break;
-
-        case B: case b: {
-            // Bishop can look through friendly queen
-            U64 friendlyQueens = bitboards[(side == white) ? Q : q];
-            mobilityBB = getBishopAttacks(squarePiece, occupancies[both] & ~friendlyQueens) & ~occupancies[side];
-            break;
-        }
-
-        case R: case r: {
-            // Rook can look through friendly queen and other rooks
-            U64 friendlyQueensRooks = bitboards[(side == white) ? Q : q] | bitboards[(side == white) ? R : r];
-            mobilityBB = getRookAttacks(squarePiece, occupancies[both] & ~friendlyQueensRooks) & ~occupancies[side];
-            break;
-        }
-
-        case Q: case q:
-            // Queen mobility with enemy piece attacks excluded
-            mobilityBB = getQueenAttacks(squarePiece, occupancies[both]) & ~occupancies[side];
-            break;
+    U64 blockers = 0ULL;
+    while (snipers) {
+        int sniperSq = getLSFBIndex(snipers);
+        U64 between = betweenMask[ksq][sniperSq] & occ;
+        if (between && (between & (between - 1)) == 0)
+            blockers |= between;
+        popBit(snipers, sniperSq);
     }
-
-    // Apply exclusion mask
-    mobilityBB &= ~excludeMask;
-
-    // If piece is pinned, restrict mobility to pin ray
-    if (positionCache.pinnedPieces & (1ULL << squarePiece)) {
-        mobilityBB &= positionCache.pinnedRays[squarePiece];
-    }
-
-    return countBits(mobilityBB);
+    return blockers;
 }
 
-// Function to update mobility areas (call once before evaluation)
+// Build the per-side mobility areas and king-blocker sets once before evaluation,
+// following Stockfish. A square is excluded from a side's mobility area if it holds a
+// blocked or low-rank pawn, its own king or queen, a piece pinned to its king, or is
+// attacked by an enemy pawn. Must run after initAttacksTotal (uses enemy pawn attacks).
 static inline void updateMobilityAreas() {
-    // Calculate blocked pawns
-    U64 whitePawnBlocked = bitboards[P] & (occupancies[both] << 8);
-    U64 blackPawnBlocked = bitboards[p] & (occupancies[both] >> 8);
+    kingBlockers[white] = computeKingBlockers(white);
+    kingBlockers[black] = computeKingBlockers(black);
 
-    // Pawns in rank 2 and 3 (for white)
-    U64 whitePawnsRank23 = bitboards[P] & (rankMask[a2] | rankMask[a3]);
+    // pawns that are blocked or on the first two ranks (relative to the side)
+    U64 whitePawnExcl = bitboards[P] & ((occupancies[both] << 8) | rankMask[a2] | rankMask[a3]);
+    U64 blackPawnExcl = bitboards[p] & ((occupancies[both] >> 8) | rankMask[a6] | rankMask[a7]);
 
-    // Pawns in rank 6 and 7 (for black)
-    U64 blackPawnsRank67 = bitboards[p] & (rankMask[a6] | rankMask[a7]);
+    mobilityAreaWhite = ~(whitePawnExcl | bitboards[K] | bitboards[Q] |
+                          kingBlockers[white] | pieceAttackTables[black][P]);
 
-    // White mobility area excludes:
-    // 1. Squares attacked by enemy pawns
-    // 2. Our blocked pawns
-    // 3. Our pawns in ranks 2 and 3
-    // 4. Our king
-    mobilityAreaWhite = ~(pieceAttackTables[black][P] | whitePawnBlocked |
-                         whitePawnsRank23 | bitboards[K]);
-
-    // Black mobility area excludes:
-    // 1. Squares attacked by enemy pawns
-    // 2. Our blocked pawns
-    // 3. Our pawns in ranks 6 and 7
-    // 4. Our king
-    mobilityAreaBlack = ~(pieceAttackTables[white][P] | blackPawnBlocked |
-                         blackPawnsRank67 | bitboards[k]);
+    mobilityAreaBlack = ~(blackPawnExcl | bitboards[k] | bitboards[q] |
+                          kingBlockers[black] | pieceAttackTables[white][P]);
 }
 
-
-// Ultra-fast simplified mobility calculation with basic mobility areas
-static inline int getSimpleMobility(int piece, int squarePiece) {
-    U64 mobilityBB = 0;
-    int color = (piece >= p) ? black : white;
-    U64 relevantArea = (color == white) ? mobilityAreaWhite : mobilityAreaBlack;
+// Stockfish-style mobility. Sliders x-ray through both queens (and rooks also through
+// friendly rooks) by removing those pieces from the occupancy passed to the magic
+// lookup. A piece pinned to its own king is restricted to the pin line. The result is
+// the count of attacked squares inside the side's mobility area.
+static inline int getMobility(int piece, int sq) {
+    int us = (piece >= p) ? black : white;
+    U64 area = (us == white) ? mobilityAreaWhite : mobilityAreaBlack;
+    U64 occ = occupancies[both];
+    U64 queens = bitboards[Q] | bitboards[q];
+    U64 att = 0;
 
     switch (piece) {
         case N: case n:
-            mobilityBB = knightAttacks[squarePiece] & relevantArea;
+            att = knightAttacks[sq];
             break;
 
         case B: case b:
-            mobilityBB = getBishopAttacks(squarePiece, occupancies[both]) & relevantArea;
+            att = getBishopAttacks(sq, occ ^ queens);
             break;
 
         case R: case r:
-            mobilityBB = getRookAttacks(squarePiece, occupancies[both]) & relevantArea;
+            att = getRookAttacks(sq, occ ^ queens ^ bitboards[(us == white) ? R : r]);
             break;
 
         case Q: case q:
-            mobilityBB = getQueenAttacks(squarePiece, occupancies[both]) & relevantArea;
+            att = getQueenAttacks(sq, occ);
             break;
     }
 
-    return countBits(mobilityBB);
+    // a piece pinned to its own king may only move along the pin line
+    if (kingBlockers[us] & (1ULL << sq)) {
+        int ksq = getLSFBIndex(bitboards[(us == white) ? K : k]);
+        att &= lineBB[ksq][sq];
+    }
+
+    return countBits(att & area);
 }
 
 // evaluate material only for a side
@@ -1105,7 +1065,7 @@ static inline int evaluateWhiteKnight(int square, int stage, int stageScore)
     score += getPositionScore(N, square, stage, stageScore);
 
     // Mobility with improved bonus
-    int mobility = getSimpleMobility(N, square);
+    int mobility = getMobility(N, square);
     if (stage == middlegame) {
         score += interpolate(mobilityBonus[N][mobility][opening], mobilityBonus[N][mobility][endgame], stageScore);
     } else {
@@ -1184,7 +1144,7 @@ static inline int evaluateBlackKnight(int square, int stage, int stageScore)
     score -= getPositionScore(N, mirrorScore[square], stage, stageScore);
 
     // Use the black knight (n) for mobility calculation
-    int mobility = getSimpleMobility(n, square);
+    int mobility = getMobility(n, square);
     if (stage == middlegame) {
         score -= interpolate(mobilityBonus[N][mobility][opening], mobilityBonus[N][mobility][endgame], stageScore);
     } else {
@@ -1272,7 +1232,7 @@ static inline int evaluateWhiteBishop(int square, int stage, int stageScore) {
     U64 bishopAttacksXRay = getBishopAttacks(square, occupancies[both] ^ (bitboards[Q] | bitboards[q]));
 
     // 3. Mobility - critical for bishops
-    int mobility = getSimpleMobility(B, square);
+    int mobility = getMobility(B, square);
     if (stage == middlegame) {
         score += interpolate(mobilityBonus[B][mobility][opening], mobilityBonus[B][mobility][endgame], stageScore);
     } else {
@@ -1354,7 +1314,7 @@ static inline int evaluateBlackBishop(int square, int stage, int stageScore) {
     U64 bishopAttacksXRay = getBishopAttacks(square, occupancies[both] ^ (bitboards[Q] | bitboards[q]));
 
     // 3. Mobility - critical for bishops
-    int mobility = getSimpleMobility(b, square);
+    int mobility = getMobility(b, square);
     if (stage == middlegame) {
         score -= interpolate(mobilityBonus[B][mobility][opening], mobilityBonus[B][mobility][endgame], stageScore);
     } else {
@@ -1448,7 +1408,7 @@ static inline int evaluateWhiteRook(int square, int stage, int stageScore)
     score += rookAdj[countBits(bitboards[P])];
 
     // Get mobility and attacks
-    int mobility = getSimpleMobility(R, square);
+    int mobility = getMobility(R, square);
     U64 rookAttacks = getRookAttacks(square, occupancies[both]);
 
     if (stage == middlegame) {
@@ -1510,7 +1470,7 @@ static inline int evaluateBlackRook(int square, int stage, int stageScore)
     score -= rookAdj[countBits(bitboards[p])];
 
     // Get mobility and attacks
-    int mobility = getSimpleMobility(r, square);
+    int mobility = getMobility(r, square);
     U64 rookAttacks = getRookAttacks(square, occupancies[both]);
 
     if (stage == middlegame) {
@@ -1570,7 +1530,7 @@ static inline int evaluateWhiteQueen(int square, int stage, int stageScore)
 
     score += getPositionScore(Q, square, stage, stageScore);
 
-    int queenMobility = getSimpleMobility(Q, square);
+    int queenMobility = getMobility(Q, square);
     if (stage == middlegame) {
         score += interpolate(mobilityBonus[Q][queenMobility][opening], mobilityBonus[Q][queenMobility][endgame], stageScore);
     } else {
@@ -1619,7 +1579,7 @@ static inline int evaluateBlackQueen(int square, int stage, int stageScore)
     score -= getPositionScore(Q, mirrorScore[square], stage, stageScore);
 
     // Use the black queen (q) for mobility calculation
-    int queenMobility = getSimpleMobility(q, square);
+    int queenMobility = getMobility(q, square);
     if (stage == middlegame) {
         score -= interpolate(mobilityBonus[Q][queenMobility][opening], mobilityBonus[Q][queenMobility][endgame], stageScore);
     } else {

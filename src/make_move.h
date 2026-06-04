@@ -266,8 +266,6 @@ static inline int makeMove(int move, int moveType)
         initAttacksTotal();
         updateMobilityAreas();
 
-        positionCache.positionHash = ~0ULL;
-
         // ===== debug hash key incremental update ==== //
         /*
         U64 hashFromScratch = generateHashKey();
