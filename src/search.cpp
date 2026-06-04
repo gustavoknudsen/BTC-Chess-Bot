@@ -552,7 +552,7 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
     // shrinks when improving so a rising eval prunes one depth's worth sooner.
 	if (excludedMove == 0 && depth < 3 && !pvNode && !inCheck && abs(beta) < mateScore)
 	{
-		int evalMargin = 120 * (depth - improving);
+		int evalMargin = 168 * (depth - improving);
 		if (eval - evalMargin >= beta)
 			return eval - evalMargin;
 	}
@@ -594,7 +594,7 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
     // razoring (Strelka-style) (skip during singular verification)
     if (excludedMove == 0 && !pvNode && !inCheck && depth <= 3)
     {
-        score = eval + 125;
+        score = eval + 192;
         int newScore;
 
         if (score < beta)
@@ -605,7 +605,7 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
                 return (newScore > score) ? newScore : score;
             }
 
-            score += 175;
+            score += 269;
 
             if (score < beta && depth <= 2)
             {
@@ -745,7 +745,7 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
             // frontier futility: if the static eval is so far below alpha
             // that even a depth-scaled margin cannot bridge the gap, skip
             // this quiet move.
-            if (depth <= 6 && eval + 120 * depth <= alpha)
+            if (depth <= 6 && eval + 184 * depth <= alpha)
             {
                 ply--;
                 repetitionIndex--;
@@ -1033,7 +1033,7 @@ void search(int depth)
         // fail-low we double delta and widen the offending bound, retrying
         // at the same depth. once delta exceeds 800 we give up and fall back
         // to the full window so the search always converges.
-        int delta = 50;
+        int delta = 77;
         if (currentDepth >= 4)
         {
             alpha = score - delta;
@@ -1075,7 +1075,7 @@ void search(int depth)
             }
 
             delta *= 2;
-            if (delta > 800)
+            if (delta > 1230)
             {
                 alpha = -infinity;
                 beta  =  infinity;

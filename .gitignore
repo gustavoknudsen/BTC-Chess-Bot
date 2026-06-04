@@ -29,8 +29,14 @@ Thumbs.db
 # reference material kept locally only
 .stockfish*/
 
+# texel tuning datasets (large, kept locally)
+*.epd
+*.epd.gz
+*.epd.zip
+
 # internal development context (handover for new chat sessions)
 HANDOVER.md
+ROADMAP.md
 
 # uci client side files
 *.uci_options

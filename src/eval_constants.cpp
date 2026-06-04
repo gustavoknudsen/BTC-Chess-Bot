@@ -20,56 +20,56 @@ int defaultMaterialScore[12] = {
 // material scores [stage][piece]
 int materialScore[2][12] = {
 {
-    82,      // white pawn score
-    337,      // white knight scrore
-    365,      // white bishop score
-    477,      // white rook score
-   1025,      // white queen score
-  10000,      // white king score
-   -82,      // black pawn score
-   -337,      // black knight scrore
-   -365,      // black bishop score
-   -477,      // black rook score
-  -1025,      // black queen score
- -10000,      // black king score
+    126,
+    781,
+    825,
+    1276,
+    2538,
+    10000,
+    -126,
+    -781,
+    -825,
+    -1276,
+    -2538,
+    -10000,
 },
 {
-    94,      // white pawn score
-    281,      // white knight scrore
-    297,      // white bishop score
-    512,      // white rook score
-   936,      // white queen score
-  10000,      // white king score
-   -94,      // black pawn score
-   -281,      // black knight scrore
-   -297,      // black bishop score
-   -512,      // black rook score
-  -936,      // black queen score
- -10000,      // black king score
+    208,
+    854,
+    915,
+    1380,
+    2682,
+    10000,
+    -208,
+    -854,
+    -915,
+    -1380,
+    -2682,
+    -10000,
 }
 };
 
 // material adjustment based on pawn number
-int knightAdj[9] = { -20, -16, -12, -8, -4,  0,  4,  8, 12 };
-int rookAdj[9] = { 15,  12,   9,  6,  3,  0, -3, -6, -9 };
+int knightAdj[9] = { -31, -25, -18, -12, -6,  0,  6, 12, 18 };
+int rookAdj[9] = { 23,  18,  14,  9,  5,  0, -5, -9, -14 };
 
 // double pawns penalty (values from old Stockfish, subject to change {mg, eg})
-extern const int doublePawnPenalty[2] = {-11, -51};
+int doublePawnPenalty[2] = {-11, -51};
 
 // Early doubled pawns (additional penalty when no enemy pawns fixed)
-extern const int doubledEarlyPenalty[2] = {-17, -7};
+int doubledEarlyPenalty[2] = {-17, -7};
 
 // Isolated pawn penalty
-extern const int isolatedPawnPenalty[2] = {-1, -20};
+int isolatedPawnPenalty[2] = {-1, -20};
 
 // Backward pawn penalty
-extern const int backwardPawnPenalty[2] = {-6, -19};
+int backwardPawnPenalty[2] = {-6, -19};
 
 // Weak unopposed pawn penalty (for isolated/backward pawns with no enemy pawns ahead)
-extern const int weakUnopposed[2] = {-15, -18};
+int weakUnopposed[2] = {-15, -18};
 
 // passed pawn rank bonus [stage][rank] (values from old Stockfish, subject to change)
-extern const int passedPawnRankBonus[2][8] =
+int passedPawnRankBonus[2][8] =
 {
     {
         0, 0, 5, 12, 10, 57, 163, 271
@@ -80,7 +80,7 @@ extern const int passedPawnRankBonus[2][8] =
 };
 
 // passed pawn passed file bonus [stage][file]
-extern const int passedPawnFileBonus[2][8] =
+int passedPawnFileBonus[2][8] =
 {
     {
         -1, 0, -9, -30, -30, -9, 0, -1
@@ -91,28 +91,28 @@ extern const int passedPawnFileBonus[2][8] =
 };
 
 // Connected pawn bonus by rank
-extern const int connectedPawnBonus[8] = {0, 3, 7, 7, 15, 54, 86, 0};
+int connectedPawnBonus[8] = {0, 3, 7, 7, 15, 54, 86, 0};
 
-extern const int blockedPawnBonus[2][2] = {
+int blockedPawnBonus[2][2] = {
     {19, 8},    // Rank 5
     {7, -3}     // Rank 6
 };
 
 // semi open file score (values from old Stockfish, subject to change {mg, eg})
-extern const int semiOpenFileScore[2] = {18, 7};
+int semiOpenFileScore[2] = {18, 7};
 
 // open file score (values from old Stockfish, subject to change {mg, eg})
-extern const int openFileScore[2] = {44, 20};
+int openFileScore[2] = {44, 20};
 
-extern const int RookOnClosedFile[2] = { 10, 5 };
-extern const int RookOnOpenFile[2][2] = {
+int RookOnClosedFile[2] = { 10, 5 };
+int RookOnOpenFile[2][2] = {
     { 18, 8 },   // Semi-open file
     { 49, 26 }   // Fully open file
 };
 
 // mobility bonus (values from old Stockfish, subject to change {mg, eg})
 // [piece][# of attacked squares != friendly pieces][stage]
-extern const int mobilityBonus[6][32][2] =
+int mobilityBonus[6][32][2] =
 {
     // pawns
     {
@@ -167,12 +167,35 @@ extern const int mobilityBonus[6][32][2] =
 };
 
 // attacking king zone attack weight table [piece number]
-extern const int attackWeight[8] = {0, 0, 50, 75, 88, 94, 97, 99};
+int attackWeight[8] = {0, 0, 50, 75, 88, 94, 97, 99};
 
-extern const int KingAttackValues[6] = { 0, 0, 77, 55, 44, 10 };
+// indexed by BTC piece enum {P,N,B,R,Q,K}; values from old Stockfish KingAttackWeights
+int KingAttackWeights[6] = { 0, 76, 46, 45, 14, 0 };
+
+// safe-check bonus by attacker type {P,N,B,R,Q,K} x {single, multiple}, from old Stockfish SafeCheck
+int SafeCheck[6][2] = {
+    {   0,    0 },
+    { 805, 1292 },  // knight
+    { 650,  984 },  // bishop
+    {1071, 1886 },  // rook
+    { 730, 1128 },  // queen
+    {   0,    0 }
+};
+
+// king danger contribution weights (old-Stockfish starting values; Texel-tuned in BTC units)
+int kdWeakRing      = 183;
+int kdUnsafeCheck   = 148;
+int kdBlocker       = 98;
+int kdKingAttacks   = 69;
+int kdFlankAttack   = 3;
+int kdNoQueen       = 873;
+int kdKnightDefense = 100;
+int kdShelter       = 6;
+int kdFlankDefense  = 4;
+int kdInit          = 37;
 
 // tempo bonus
-extern const int tempoBonus = 28;
+int tempoBonus = 28;
 
 // shelter strength bonuses
 int ShelterStrength[4][7] = {
@@ -190,41 +213,41 @@ int UnblockedStorm[4][7] = {
     { -10, -14, 90, 15, 2, -7, -16 }
 };
 
-extern const int OutpostBonusKnight[2]      = { 54, 34 };
-extern const int UncontestedOutpost[2]      = {  0, 10 };
-extern const int BishopOnKingRing[2]        = { 24,  0 };
-extern const int BishopXRayPawns[2]         = {  4,  5 };
-extern const int FlankAttacks[2]            = {  8,  0 };
-extern const int Hanging[2]                 = { 72, 40 };
-extern const int KnightOnQueen[2]           = { 16, 11 };
-extern const int LongDiagonalBishop[2]      = { 45,  0 };
-extern const int MinorBehindPawn[2]         = { 18,  3 };
-extern const int PassedFile[2]              = { 13,  8 };
-extern const int PawnlessFlank[2]           = { 19, 97 };
-extern const int ReachableOutpost[2]        = { 33, 19 };
-extern const int RestrictedPiece[2]         = {  6,  7 };
-extern const int RookOnKingRing[2]          = { 16,  0 };
-extern const int SliderOnQueen[2]           = { 62, 21 };
-extern const int ThreatByKing[2]            = { 24, 87 };
-extern const int ThreatByPawnPush[2]        = { 48, 39 };
-extern const int ThreatBySafePawn[2]        = {167, 99 };
-extern const int TrappedRook[2]             = { 55, 13 };
-extern const int WeakQueenProtection[2]     = { 14,  0 };
-extern const int WeakQueen[2]               = { 57, 19 };
-extern const int KingProtectorKnight[2]     = {  9,  9 };
-extern const int OutpostBonusBishop[2]      = { 31, 25 };  // Outpost[1] for bishop
-extern const int KingProtectorBishop[2]     = {  7,  9 };  // KingProtector[1] for bishop
-extern const int BishopPairBonus[2]         = { 25, 50 };
-extern const int WeakLever[2]               = { -2, -57};
-extern const int BishopPawnsPenalty[4][2]   = {
+int OutpostBonusKnight[2]      = { 54, 34 };
+int UncontestedOutpost[2]      = {  0, 10 };
+int BishopOnKingRing[2]        = { 24,  0 };
+int BishopXRayPawns[2]         = {  4,  5 };
+int FlankAttacks[2]            = {  8,  0 };
+int Hanging[2]                 = { 72, 40 };
+int KnightOnQueen[2]           = { 16, 11 };
+int LongDiagonalBishop[2]      = { 45,  0 };
+int MinorBehindPawn[2]         = { 18,  3 };
+int PassedFile[2]              = { 13,  8 };
+int PawnlessFlank[2]           = { 19, 97 };
+int ReachableOutpost[2]        = { 33, 19 };
+int RestrictedPiece[2]         = {  6,  7 };
+int RookOnKingRing[2]          = { 16,  0 };
+int SliderOnQueen[2]           = { 62, 21 };
+int ThreatByKing[2]            = { 24, 87 };
+int ThreatByPawnPush[2]        = { 48, 39 };
+int ThreatBySafePawn[2]        = {167, 99 };
+int TrappedRook[2]             = { 55, 13 };
+int WeakQueenProtection[2]     = { 14,  0 };
+int WeakQueen[2]               = { 57, 19 };
+int KingProtectorKnight[2]     = {  9,  9 };
+int OutpostBonusBishop[2]      = { 31, 25 };  // Outpost[1] for bishop
+int KingProtectorBishop[2]     = {  7,  9 };  // KingProtector[1] for bishop
+int BishopPairBonus[2]         = { 25, 50 };
+int WeakLever[2]               = { -2, -57};
+int BishopPawnsPenalty[4][2]   = {
     { 3, 8 }, // Edge distance 0 (a/h files)
     { 3, 9 }, // Edge distance 1 (b/g files)
     { 2, 7 }, // Edge distance 2 (c/f files)
     { 3, 7 }  // Edge distance 3 (d/e files)
 };
-extern const int CorneredBishop             = 50;      // Penalty for cornered bishop in Chess960
+int CorneredBishop             = 50;      // Penalty for cornered bishop in Chess960
 
-extern const int ThreatByMinor[6][2] = {
+int ThreatByMinor[6][2] = {
     {  0,   0 },
     {  6,  37 },
     { 64,  50 },
@@ -233,7 +256,7 @@ extern const int ThreatByMinor[6][2] = {
     { 81, 163 }
 };
 
-extern const int ThreatByRook[6][2] = {
+int ThreatByRook[6][2] = {
     {  0,  0 },
     { 54, 42 },
     { 56, 43 },

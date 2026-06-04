@@ -79,6 +79,13 @@ extern U64 centerFiles;
 extern U64 outpostRanksWhite;
 extern U64 outpostRanksBlack;
 
+// king-flank file groups [file] and per-side camp (own half + middle), for king safety
+extern U64 kingFlankMask[8];
+extern U64 campMask[2];
+
+// squares strictly between two aligned squares (empty if not on a line), for blocker/pin detection
+extern U64 betweenMask[64][64];
+
 //  isolated pawn mask bitboard
 extern U64 isolatedMask[64];
 
