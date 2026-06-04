@@ -724,9 +724,8 @@ static inline kingShelter getKingDanger(int us, int shelterMg)
 int getPieceType(int square, int side);
 
 // Threats by side `us` against the enemy, following Stockfish threats(). Uses the
-// attack/weak/defended sets built in initAttacksTotal. KnightOnQueen and SliderOnQueen
-// are deferred to v2.8 (they need mobility-area info). Constants are old-Stockfish units
-// and are rescaled to BTC PeSTO units at the end. Returns a score from us's perspective.
+// attack/weak/defended sets built in initAttacksTotal and the per-node mobility areas.
+// Constants are old-Stockfish units. Returns a score from us's perspective.
 static inline int evaluateThreats(int us, int stageScore) {
     int them = 1 - us;
     int mg = 0, eg = 0;
@@ -836,7 +835,68 @@ static inline int evaluateThreats(int us, int stageScore) {
     mg += ThreatByPawnPush[0] * pushHits;
     eg += ThreatByPawnPush[1] * pushHits;
 
+    // Threats on the next move against a lone enemy queen. A square is a usable target if
+    // it is in our mobility area, not on one of our pawns, and not strongly protected by
+    // the enemy. KnightOnQueen counts safe squares from which a knight forks the queen;
+    // SliderOnQueen counts safe, doubly-attacked squares from which a slider hits it.
+    U64 enemyQueen = bitboards[(us == white) ? q : Q];
+    if (countBits(enemyQueen) == 1)
+    {
+        int queenImbalance = (countBits(bitboards[Q] | bitboards[q]) == 1) ? 1 : 0;
+        int qsq = getLSFBIndex(enemyQueen);
+        U64 area = (us == white) ? mobilityAreaWhite : mobilityAreaBlack;
+        U64 safeSq = area & ~ourPawns & ~stronglyProtectedThem;
+
+        U64 kb = pieceAttackTables[us][N] & knightAttacks[qsq];
+        int knightHits = countBits(kb & safeSq);
+        mg += KnightOnQueen[0] * knightHits * (1 + queenImbalance);
+        eg += KnightOnQueen[1] * knightHits * (1 + queenImbalance);
+
+        U64 sb = (pieceAttackTables[us][B] & getBishopAttacks(qsq, occupancies[both]))
+               | (pieceAttackTables[us][R] & getRookAttacks(qsq, occupancies[both]));
+        int sliderHits = countBits(sb & safeSq & attackedBy2[us]);
+        mg += SliderOnQueen[0] * sliderHits * (1 + queenImbalance);
+        eg += SliderOnQueen[1] * sliderHits * (1 + queenImbalance);
+    }
+
     return interpolate(mg, eg, stageScore);
+}
+
+// Minimum non-pawn material (both sides, mg units) for the space term to apply. Below
+// this, too much has been traded for space to matter. Matches Stockfish SpaceThreshold.
+static const int SpaceThreshold = 11551;
+
+// Stockfish space(): counts safe squares on the four central files in our own half,
+// weighted up by how many pieces are on the board and how blocked the pawn structure is.
+// Pure middlegame term (eg component zero). stageScore is the non-pawn material total,
+// which equals Stockfish's non_pawn_material() on this material scale.
+static inline int evaluateSpace(int us, int stageScore) {
+    if (stageScore < SpaceThreshold)
+        return 0;
+
+    int them = 1 - us;
+    U64 ourPawns = bitboards[(us == white) ? P : p];
+    U64 spaceMask = centerFiles & ((us == white) ? (rankMask[a2] | rankMask[a3] | rankMask[a4])
+                                                 : (rankMask[a7] | rankMask[a6] | rankMask[a5]));
+
+    // safe central squares: not on our pawns, not attacked by an enemy pawn
+    U64 safeArea = spaceMask & ~ourPawns & ~pieceAttackTables[them][P];
+
+    // squares up to three ranks behind a friendly pawn (count completely safe ones twice)
+    U64 behind = ourPawns;
+    if (us == white) { behind |= behind << 8; behind |= behind << 16; }
+    else             { behind |= behind >> 8; behind |= behind >> 16; }
+
+    int bonus = countBits(safeArea)
+              + countBits(behind & safeArea & ~pieceAttackTables[them][allPieces]);
+
+    // blocked pawns (both sides): a pawn whose front square holds an enemy pawn or is
+    // covered by two enemy pawns
+    int blockedCount = countBits((bitboards[P] >> 8) & (bitboards[p] | pawnDoubleTables[black]))
+                     + countBits((bitboards[p] << 8) & (bitboards[P] | pawnDoubleTables[white]));
+
+    int weight = countBits(occupancies[us]) - 3 + std::min(blockedCount, 9);
+    return bonus * weight * weight / 16;
 }
 
 static inline int getPositionScore(int piece, int square, int stage, int stageScore) {
@@ -846,6 +906,76 @@ static inline int getPositionScore(int piece, int square, int stage, int stageSc
                          stageScore);
     }
     return PieceTables[stage][piece][square];
+}
+
+// Chebyshev king distance to a square, capped at 5. (distance() elsewhere is Manhattan,
+// so this is computed directly.)
+static inline int kingProximity(int ksq, int sq) {
+    int d = std::max(abs(getFile[ksq] - getFile[sq]), abs(getRank[ksq] - getRank[sq]));
+    return std::min(d, 5);
+}
+
+// Passed-pawn bonus for a pawn of colour `us` on square s. Returns the bonus from us's
+// perspective; pawns that are not passed return 0. Starts from a rank/file base, then for
+// pawns past the 3rd rank adds king-proximity (endgame) and, if the pawn can advance, a
+// bonus scaled by how safe and defended its path to promotion is.
+static inline int evaluatePassedPawn(int us, int s, int stageScore) {
+    int them = 1 - us;
+    U64 span = (us == white) ? whitePassedMask[s] : blackPassedMask[s];
+
+    // strict passed pawn: no enemy pawn anywhere in the 3-file forward span
+    if (span & bitboards[(us == white) ? p : P])
+        return 0;
+
+    int r = relativeRank(us, getRank[s]);
+    int mg = PassedRank[r][0];
+    int eg = PassedRank[r][1];
+
+    if (r > 2)
+    {
+        int up = (us == white) ? -8 : 8;
+        int blockSq = s + up;
+        int ksqUs   = getLSFBIndex(bitboards[(us == white) ? K : k]);
+        int ksqThem = getLSFBIndex(bitboards[(us == white) ? k : K]);
+        int w = 5 * r - 13;
+
+        // king proximity to the stop square (endgame only)
+        eg += (kingProximity(ksqThem, blockSq) * 19 / 4 - kingProximity(ksqUs, blockSq) * 2) * w;
+        if (r != 6)
+            eg -= kingProximity(ksqUs, blockSq + up) * w;
+
+        // if the pawn is free to advance, reward a clear/defended path to promotion
+        if (!getBit(occupancies[both], blockSq))
+        {
+            U64 squaresToQueen = (us == white) ? whiteOpposedMask[s] : blackOpposedMask[s];
+            U64 unsafeSquares  = span;
+            U64 behindFile     = (us == white) ? blackOpposedMask[s] : whiteOpposedMask[s];
+            U64 rooksQueens    = bitboards[R] | bitboards[r] | bitboards[Q] | bitboards[q];
+            U64 bb = behindFile & rooksQueens;
+
+            // unless an enemy rook/queen sits behind the pawn, only enemy-controlled or
+            // enemy-occupied squares on the span count as unsafe
+            if (!(occupancies[them] & bb))
+                unsafeSquares &= pieceAttackTables[them][allPieces] | occupancies[them];
+
+            U64 blockBit = 1ULL << blockSq;
+            int k = !unsafeSquares                               ? 36 :
+                    !(unsafeSquares & ~pieceAttackTables[us][P]) ? 30 :
+                    !(unsafeSquares & squaresToQueen)            ? 17 :
+                    !(unsafeSquares & blockBit)                  ?  7 : 0;
+
+            // bonus if our own rook/queen backs the pawn or we defend the stop square
+            if ((occupancies[us] & bb) || (pieceAttackTables[us][allPieces] & blockBit))
+                k += 5;
+
+            mg += k * w;
+            eg += k * w;
+        }
+    }
+
+    int file = getFile[s];
+    int edge = std::min(file, 7 - file);
+    return interpolate(mg, eg, stageScore) - interpolate(PassedFile[0], PassedFile[1], stageScore) * edge;
 }
 
 static inline int evaluateWhitePawn(int square, int stage, int stageScore)
@@ -876,14 +1006,7 @@ static inline int evaluateWhitePawn(int square, int stage, int stageScore)
     int isUnopposed = ((whiteOpposedMask[square] & bitboards[p]) == 0) ? 1 : 0;
 
     // Passed pawn evaluation
-    if ((whitePassedMask[square] & bitboards[p]) == 0) {
-        score += interpolate(passedPawnRankBonus[opening][getRank[square]],
-                           passedPawnRankBonus[endgame][getRank[square]],
-                           stageScore);
-        score += interpolate(passedPawnFileBonus[opening][getFile[square]],
-                           passedPawnFileBonus[endgame][getFile[square]],
-                           stageScore);
-    }
+    score += evaluatePassedPawn(white, square, stageScore);
 
     // Connected pawn calculations
     int phalanx = ((phalanxMask[square] & bitboards[P]) != 0) ? 1 : 0;
@@ -973,14 +1096,7 @@ static inline int evaluateBlackPawn(int square, int stage, int stageScore)
     int isUnopposed = ((blackOpposedMask[square] & bitboards[P]) == 0) ? 1 : 0;
 
     // Passed pawn evaluation
-    if ((blackPassedMask[square] & bitboards[P]) == 0) {
-        score -= interpolate(passedPawnRankBonus[opening][getRank[mirrorScore[square]]],
-                           passedPawnRankBonus[endgame][getRank[mirrorScore[square]]],
-                           stageScore);
-        score -= interpolate(passedPawnFileBonus[opening][getFile[mirrorScore[square]]],
-                           passedPawnFileBonus[endgame][getFile[mirrorScore[square]]],
-                           stageScore);
-    }
+    score -= evaluatePassedPawn(black, square, stageScore);
 
     // Connected pawn calculations
     int phalanx = ((phalanxMask[square] & bitboards[p]) != 0) ? 1 : 0;
@@ -1119,10 +1235,7 @@ static inline int evaluateWhiteKnight(int square, int stage, int stageScore)
         score += interpolate(MinorBehindPawn[0], MinorBehindPawn[1], stageScore);
     }
 
-    // Knight attacking queen bonus
-    if (pieceAttackTables[white][N] & bitboards[q]) {
-        score += interpolate(KnightOnQueen[0], KnightOnQueen[1], stageScore);
-    }
+    // KnightOnQueen handled centrally in evaluateThreats()
 
     // Threats handled centrally in evaluateThreats()
 
@@ -1198,12 +1311,7 @@ static inline int evaluateBlackKnight(int square, int stage, int stageScore)
         score -= interpolate(MinorBehindPawn[0], MinorBehindPawn[1], stageScore);
     }
 
-    // Knight attacking queen bonus
-    // pieceAttackTables is indexed by piece type [P, N, B, R, Q, K], not piece colour+type
-    // so the black knight attack set is pieceAttackTables[black][N], not [black][P]
-    if (pieceAttackTables[black][N] & bitboards[Q]) {
-        score -= interpolate(KnightOnQueen[0], KnightOnQueen[1], stageScore);
-    }
+    // KnightOnQueen handled centrally in evaluateThreats()
 
     // Threats handled centrally in evaluateThreats()
 
@@ -1803,6 +1911,9 @@ static inline int evaluate()
 
     // Add threat score (Stockfish-style threats, computed once per side)
     score += evaluateThreats(white, stageScore) - evaluateThreats(black, stageScore);
+
+    // Space (middlegame-only; the mg total decays toward the endgame via interpolation)
+    score += interpolate(evaluateSpace(white, stageScore) - evaluateSpace(black, stageScore), 0, stageScore);
 
     // bishop pair bonus
     int bishopPair = evaluateBishopPair(stage, stageScore);

@@ -39,11 +39,8 @@ extern int backwardPawnPenalty[2];
 // Weak unopposed pawn penalty (for isolated/backward pawns with no enemy pawns ahead)
 extern int weakUnopposed[2];
 
-// passed pawn rank bonus [stage][rank] (values from old Stockfish, subject to change)
-extern int passedPawnRankBonus[2][8];
-
-// passed pawn passed file bonus [stage][file]
-extern int passedPawnFileBonus[2][8];
+// passed pawn bonus by relative rank {mg, eg} (Stockfish PassedRank; rank 1 = index 0)
+extern int PassedRank[8][2];
 
 // Connected pawn bonus by rank
 extern int connectedPawnBonus[8];

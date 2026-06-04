@@ -69,25 +69,10 @@ int backwardPawnPenalty[2] = {-6, -19};
 int weakUnopposed[2] = {-15, -18};
 
 // passed pawn rank bonus [stage][rank] (values from old Stockfish, subject to change)
-int passedPawnRankBonus[2][8] =
+// passed pawn bonus by relative rank {mg, eg} (Stockfish PassedRank; rank 1 = index 0)
+int PassedRank[8][2] =
 {
-    {
-        0, 0, 5, 12, 10, 57, 163, 271
-    },
-    {
-        0, 0, 18, 23, 31, 62, 167, 250
-    }
-};
-
-// passed pawn passed file bonus [stage][file]
-int passedPawnFileBonus[2][8] =
-{
-    {
-        -1, 0, -9, -30, -30, -9, 0, -1
-    },
-    {
-        7, 9, -8, -14, -14, -8, 9, 7
-    }
+    {0, 0}, {2, 38}, {15, 36}, {22, 50}, {64, 81}, {166, 184}, {284, 269}, {0, 0}
 };
 
 // Connected pawn bonus by rank
