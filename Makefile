@@ -58,8 +58,9 @@ HDRS := $(wildcard $(SRC_DIR)/*.h)
 ENGINE        := btc$(ENGINE_VERSION_TAG).exe
 ENGINE_DEBUG  := btc$(ENGINE_VERSION_TAG)_debug.exe
 PERFT         := test_perft.exe
+TUNER         := texel.exe
 
-.PHONY: all build debug perft test clean
+.PHONY: all build debug perft test tuner clean
 
 all: build
 
@@ -77,6 +78,12 @@ perft: $(PERFT)
 
 $(PERFT): $(TESTS_DIR)/test_perft.cpp $(SRCS_NO_MAIN) $(HDRS)
 	$(CXX) $(CXXFLAGS) -o $@ $(TESTS_DIR)/test_perft.cpp $(SRCS_NO_MAIN)
+
+# Texel tuning driver: links the engine eval (no main.cpp) with its own main.
+tuner: $(TUNER)
+
+$(TUNER): tuner/texel.cpp $(SRCS_NO_MAIN) $(HDRS)
+	$(CXX) $(CXXFLAGS) -o $@ tuner/texel.cpp $(SRCS_NO_MAIN)
 
 # Run perft on a handful of well-known positions at depth 4 and check
 # the totals against the canonical node counts. Validates move
