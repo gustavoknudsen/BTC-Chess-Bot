@@ -1188,9 +1188,6 @@ static inline int evaluateWhiteKnight(int square, int stage, int stageScore)
         score += mobilityBonus[N][mobility][stage];
     }
 
-    // Knight adjustment based on pawn count
-    score += knightAdj[countBits(bitboards[P])];
-
     // Outpost bonus - knight on rank 4-6 protected by pawn and safe from enemy pawn attacks
     // Ranks 4-6
     U64 outpostRanks = rankMask[a4] | rankMask[a5] | rankMask[a6];
@@ -1263,9 +1260,6 @@ static inline int evaluateBlackKnight(int square, int stage, int stageScore)
     } else {
         score -= mobilityBonus[N][mobility][stage];
     }
-
-    // Knight adjustment based on pawn count
-    score -= knightAdj[countBits(bitboards[p])];
 
     // Outpost bonus - knight on rank 3-5 protected by pawn and safe from enemy pawn attacks
     // Ranks 3-5 for black
@@ -1484,21 +1478,36 @@ static inline int evaluateBlackBishop(int square, int stage, int stageScore) {
     return score;
 }
 
-// Bishop pair bonus (call this in your main evaluation function)
-static inline int evaluateBishopPair(int stage, int stageScore) {
-    int score = 0;
-
-    // Check if white has bishop pair
-    if (countBits(bitboards[B]) >= 2) {
-        score += interpolate(BishopPairBonus[0], BishopPairBonus[1], stageScore);
+// Second-degree polynomial material imbalance for one side and one phase (0 = mg, 1 = eg).
+// pc[colour][type] holds piece counts; index 0 is a flag for holding two bishops, then
+// 1=pawn..5=queen. Each piece type scores against our own other pieces (QuadraticOurs)
+// and the enemy's pieces (QuadraticTheirs).
+static inline int imbalanceSide(int us, const int pc[2][6], int phase) {
+    int them = 1 - us;
+    int bonus = 0;
+    for (int pt1 = 0; pt1 <= 5; pt1++) {
+        if (!pc[us][pt1])
+            continue;
+        int v = QuadraticOurs[pt1][pt1][phase] * pc[us][pt1];
+        for (int pt2 = 0; pt2 < pt1; pt2++)
+            v += QuadraticOurs[pt1][pt2][phase] * pc[us][pt2]
+               + QuadraticTheirs[pt1][pt2][phase] * pc[them][pt2];
+        bonus += pc[us][pt1] * v;
     }
+    return bonus;
+}
 
-    // Check if black has bishop pair
-    if (countBits(bitboards[b]) >= 2) {
-        score -= interpolate(BishopPairBonus[0], BishopPairBonus[1], stageScore);
-    }
-
-    return score;
+// Material imbalance from white's perspective.
+static inline int evaluateImbalance(int stageScore) {
+    int pc[2][6] = {
+        { countBits(bitboards[B]) > 1, countBits(bitboards[P]), countBits(bitboards[N]),
+          countBits(bitboards[B]),     countBits(bitboards[R]), countBits(bitboards[Q]) },
+        { countBits(bitboards[b]) > 1, countBits(bitboards[p]), countBits(bitboards[n]),
+          countBits(bitboards[b]),     countBits(bitboards[r]), countBits(bitboards[q]) }
+    };
+    int mg = (imbalanceSide(white, pc, 0) - imbalanceSide(black, pc, 0)) / 16;
+    int eg = (imbalanceSide(white, pc, 1) - imbalanceSide(black, pc, 1)) / 16;
+    return interpolate(mg, eg, stageScore);
 }
 
 static inline int evaluateWhiteRook(int square, int stage, int stageScore)
@@ -1513,7 +1522,6 @@ static inline int evaluateWhiteRook(int square, int stage, int stageScore)
     }
 
     score += getPositionScore(R, square, stage, stageScore);
-    score += rookAdj[countBits(bitboards[P])];
 
     // Get mobility and attacks
     int mobility = getMobility(R, square);
@@ -1575,7 +1583,6 @@ static inline int evaluateBlackRook(int square, int stage, int stageScore)
 
     // Use the correct piece index (R) and mirror the square
     score -= getPositionScore(R, mirrorScore[square], stage, stageScore);
-    score -= rookAdj[countBits(bitboards[p])];
 
     // Get mobility and attacks
     int mobility = getMobility(r, square);
@@ -1915,9 +1922,8 @@ static inline int evaluate()
     // Space (middlegame-only; the mg total decays toward the endgame via interpolation)
     score += interpolate(evaluateSpace(white, stageScore) - evaluateSpace(black, stageScore), 0, stageScore);
 
-    // bishop pair bonus
-    int bishopPair = evaluateBishopPair(stage, stageScore);
-    score += bishopPair;
+    // material imbalance (piece-pair interactions)
+    score += evaluateImbalance(stageScore);
 
     // After calculating the full evaluation, adjust for near-draws
     // Only if it's in endgame and not a mate score

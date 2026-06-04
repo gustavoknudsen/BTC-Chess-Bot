@@ -20,10 +20,6 @@ extern int defaultMaterialScore[12];
 // material scores [stage][piece]
 extern int materialScore[2][12];
 
-// material adjustment based on pawn number
-extern int knightAdj[9];
-extern int rookAdj[9];
-
 // double pawns penalty (values from old Stockfish, subject to change {mg, eg})
 extern int doublePawnPenalty[2];
 
@@ -114,10 +110,12 @@ extern int WeakQueen[2];
 extern int KingProtectorKnight[2];
 extern int OutpostBonusBishop[2];  // Outpost[1] for bishop
 extern int KingProtectorBishop[2];  // KingProtector[1] for bishop
-extern int BishopPairBonus[2];
 extern int WeakLever[2];
 extern int BishopPawnsPenalty[4][2];
 extern int CorneredBishop;      // Penalty for cornered bishop in Chess960
+
+extern int QuadraticOurs[6][6][2];
+extern int QuadraticTheirs[6][6][2];
 
 extern int ThreatByMinor[6][2];
 
