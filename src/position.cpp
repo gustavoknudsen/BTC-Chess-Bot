@@ -208,6 +208,8 @@ U64 outpostRanksBlack = 0ULL;
 U64 kingFlankMask[8] = {0ULL};
 U64 campMask[2] = {0ULL};
 U64 betweenMask[64][64] = {{0ULL}};
+U64 lineBB[64][64] = {{0ULL}};
+U64 kingBlockers[2] = {0ULL};
 
 //  isolated pawn mask bitboard
 U64 isolatedMask[64];
@@ -347,8 +349,6 @@ int fifty = 0;
 
 // move number
 int moveNumber = 0;
-
-PositionCache positionCache;
 
 // parse FEN
 void parseFEN(const char *fen)

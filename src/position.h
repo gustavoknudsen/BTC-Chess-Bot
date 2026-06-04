@@ -86,6 +86,12 @@ extern U64 campMask[2];
 // squares strictly between two aligned squares (empty if not on a line), for blocker/pin detection
 extern U64 betweenMask[64][64];
 
+// full line (rank/file/diagonal) through two aligned squares (empty if not on a line), for pin restriction
+extern U64 lineBB[64][64];
+
+// pieces pinned to each side's king (single blocker between king and an enemy slider), rebuilt per node
+extern U64 kingBlockers[2];
+
 //  isolated pawn mask bitboard
 extern U64 isolatedMask[64];
 
@@ -213,19 +219,6 @@ extern int fifty;
 
 // move number
 extern int moveNumber;
-
-struct PositionCache {
-    // store the full 64-bit zobrist key, not a truncated int
-    // truncating gave us many false cache hits across unrelated positions
-    U64 positionHash;
-    U64 pinnedPieces;
-    U64 pinnedRays[64];      // Store pin rays for each square
-    U64 regularExcludeMask;  // Regular exclusion mask
-    U64 queenExcludeMask;    // Queen-specific exclusion mask
-    int side;                // Store which side the cache is for
-};
-
-extern PositionCache positionCache;
 
 // parse FEN
 void parseFEN(const char *fen);

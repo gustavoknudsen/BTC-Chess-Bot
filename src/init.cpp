@@ -28,10 +28,6 @@ void initAll()
     initEvalMasks();
     printf("init eval done\n");
 
-    initPositionCache();
-    printf("initPositionCache done\n");
-
-
     // init random keys (for hashing)
     initRandomKeys();
 

@@ -16,7 +16,7 @@
 #define copyBoard()                                                     \
 U64 bitboardsCopy[12], occupanciesCopy[3], pieceAttackTablesCopy[2][7], pawnDoubleTablesCopy[2];           \
 U64 weakCopy[2], stronglyProtectedCopy[2], safeCopy[2], defendedCopy[2], attackedBy2Copy[2], nonPawnEnemiesCopy[2], pawnSpansCopy[2];                                           \
-U64 mobilityAreaWhiteCopy, mobilityAreaBlackCopy;                       \
+U64 mobilityAreaWhiteCopy, mobilityAreaBlackCopy, kingBlockersCopy[2];  \
 int sideCopy, enpassantCopy, castleCopy, fiftyCopy, moveNumberCopy;     \
 memcpy(bitboardsCopy, bitboards, 96);                                   \
 memcpy(occupanciesCopy, occupancies, 24);                               \
@@ -31,11 +31,12 @@ memcpy(nonPawnEnemiesCopy, nonPawnEnemies, 16);                        \
 memcpy(pawnSpansCopy, pawnSpans, 16);                                  \
 mobilityAreaWhiteCopy = mobilityAreaWhite;                              \
 mobilityAreaBlackCopy = mobilityAreaBlack;                              \
+kingBlockersCopy[0] = kingBlockers[0];                                  \
+kingBlockersCopy[1] = kingBlockers[1];                                  \
 sideCopy = side, enpassantCopy = enpassant, castleCopy = castle;        \
 fiftyCopy = fifty;                                                      \
 moveNumberCopy = moveNumber;                                            \
-U64 hashKeyCopy = hashKey;                                              \
-U64 positionCacheHashCopy = positionCache.positionHash;
+U64 hashKeyCopy = hashKey;
 
 #define undoBoard()                                                      \
 memcpy(bitboards, bitboardsCopy, 96);                                    \
@@ -51,10 +52,11 @@ memcpy(nonPawnEnemies, nonPawnEnemiesCopy, 16);                         \
 memcpy(pawnSpans, pawnSpansCopy, 16);                                   \
 mobilityAreaWhite = mobilityAreaWhiteCopy;                               \
 mobilityAreaBlack = mobilityAreaBlackCopy;                               \
+kingBlockers[0] = kingBlockersCopy[0];                                   \
+kingBlockers[1] = kingBlockersCopy[1];                                   \
 side = sideCopy; enpassant = enpassantCopy, castle = castleCopy;         \
 fifty = fiftyCopy;                                                       \
 moveNumber = moveNumberCopy;                                             \
-hashKey = hashKeyCopy;                                                   \
-positionCache.positionHash = positionCacheHashCopy;
+hashKey = hashKeyCopy;
 
 #endif // COPY_MAKE_H
