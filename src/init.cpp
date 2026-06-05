@@ -28,6 +28,9 @@ void initAll()
     initEvalMasks();
     printf("init eval done\n");
 
+    // build the KP vs K bitbase (needs leaper attacks, already initialised)
+    initKPK();
+
     // init random keys (for hashing)
     initRandomKeys();
 

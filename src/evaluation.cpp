@@ -1,5 +1,109 @@
 #include "evaluation.h"
 
+// pawn-structure cache (keyed by pawn configuration; see evaluatePawnStructureCached)
+PawnHashEntry pawnHash[PAWN_HASH_SIZE];
+
+// KP vs K win/draw table, in NORMALIZED coordinates (the strong side is white and its pawn is
+// on files a-d). Generated once at startup by retrograde fixpoint. Result codes are bit flags
+// so the classify step can OR successor results together.
+#define KPK_INVALID 0
+#define KPK_UNKNOWN 1
+#define KPK_DRAW    2
+#define KPK_WIN     4
+
+static signed char kpkDB[2 * 64 * 64 * 64];
+
+// index by [side to move (0 = strong/white)][strong pawn][strong king][weak king]
+static inline int kpkIdx(int stm, int wk, int wp, int bk) {
+    return ((stm * 64 + wp) * 64 + wk) * 64 + bk;
+}
+
+static inline int kpkCheby(int a, int b) {
+    return std::max(abs(getFile[a] - getFile[b]), abs(getRank[a] - getRank[b]));
+}
+
+// Result for one position, read from the current table state. white = strong side to move.
+static int kpkClassify(int stm, int wk, int wp, int bk) {
+    int them = 1 - stm;
+    int Good = (stm == white) ? KPK_WIN : KPK_DRAW;
+    int Bad  = (stm == white) ? KPK_DRAW : KPK_WIN;
+    int r = KPK_INVALID;
+
+    if (stm == white)
+    {
+        U64 b = kingAttacks[wk];
+        while (b) { int s = getLSFBIndex(b); popBit(b, s); r |= kpkDB[kpkIdx(them, s, wp, bk)]; }
+
+        int pr = getRank[wp];                 // 1 = 2nd rank .. 6 = 7th rank
+        if (pr < 6)                            // single push (rank-7 promotion is a terminal win)
+            r |= kpkDB[kpkIdx(them, wk, wp - 8, bk)];
+        if (pr == 1 && (wp - 8) != wk && (wp - 8) != bk)   // double push from the 2nd rank
+            r |= kpkDB[kpkIdx(them, wk, wp - 16, bk)];
+    }
+    else
+    {
+        U64 b = kingAttacks[bk];
+        while (b) { int s = getLSFBIndex(b); popBit(b, s); r |= kpkDB[kpkIdx(them, wk, wp, s)]; }
+    }
+
+    return (r & Good) ? Good : (r & KPK_UNKNOWN) ? KPK_UNKNOWN : Bad;
+}
+
+void initKPK() {
+    // terminal / invalid classification
+    for (int stm = 0; stm < 2; stm++)
+        for (int wp = 0; wp < 64; wp++)
+            for (int wk = 0; wk < 64; wk++)
+                for (int bk = 0; bk < 64; bk++)
+                {
+                    int pr = getRank[wp];
+                    signed char res;
+
+                    if (wk == bk || wk == wp || bk == wp || kpkCheby(wk, bk) <= 1
+                        || pr == 0 || pr == 7
+                        || (stm == white && (pawnAttacks[white][wp] & (1ULL << bk))))
+                        res = KPK_INVALID;
+                    else if (stm == white && pr == 6 && (wp - 8) != wk
+                             && (kpkCheby(bk, wp - 8) > 1 || kpkCheby(wk, wp - 8) == 1))
+                        res = KPK_WIN;             // safe promotion
+                    else if (stm == black)
+                    {
+                        U64 ka = kingAttacks[bk];
+                        U64 noSafe = ka & ~(kingAttacks[wk] | pawnAttacks[white][wp]);
+                        bool stalemate = (noSafe == 0);
+                        bool capturePawn = (ka & (1ULL << wp)) && !(kingAttacks[wk] & (1ULL << wp));
+                        res = (stalemate || capturePawn) ? KPK_DRAW : KPK_UNKNOWN;
+                    }
+                    else
+                        res = KPK_UNKNOWN;
+
+                    kpkDB[kpkIdx(stm, wk, wp, bk)] = res;
+                }
+
+    // iterate to a fixpoint
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (int stm = 0; stm < 2; stm++)
+            for (int wp = 0; wp < 64; wp++)
+                for (int wk = 0; wk < 64; wk++)
+                    for (int bk = 0; bk < 64; bk++)
+                    {
+                        int idx = kpkIdx(stm, wk, wp, bk);
+                        if (kpkDB[idx] != KPK_UNKNOWN)
+                            continue;
+                        signed char r = (signed char)kpkClassify(stm, wk, wp, bk);
+                        if (r != KPK_UNKNOWN) { kpkDB[idx] = r; changed = true; }
+                    }
+    }
+}
+
+// probe in normalized coords (strong = white, pawn on files a-d); stm 0 = strong to move
+bool kpkProbe(int wk, int wp, int bk, int stm) {
+    return kpkDB[kpkIdx(stm, wk, wp, bk)] == KPK_WIN;
+}
+
 // set file or rank mask
 U64 setFileOrRankMask(int file, int rank)
 {

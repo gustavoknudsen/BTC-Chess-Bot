@@ -28,6 +28,21 @@ struct kingShelter {
     int egBonus;
 };
 
+// cache of pawn-structure mg/eg totals keyed by the pawn configuration
+struct PawnHashEntry {
+    U64 wp;
+    U64 bp;
+    int mg;
+    int eg;
+    bool valid;
+};
+#define PAWN_HASH_SIZE (1 << 16)
+extern PawnHashEntry pawnHash[PAWN_HASH_SIZE];
+
+// KP vs K bitbase: build at startup, then probe in normalized coords (strong = white)
+void initKPK();
+bool kpkProbe(int wk, int wp, int bk, int stm);
+
 // set file or rank mask
 U64 setFileOrRankMask(int file, int rank);
 
@@ -475,6 +490,12 @@ static inline kingShelter getKingShelter(int currentSide, int ksq, kingShelter s
             bonus.mgBonus -= UnblockedStorm[d][theirRank];
         }
     }
+
+    // penalty for the king standing on a (semi-)open file
+    int ourSemi   = !(bitboards[(currentSide == white) ? P : p] & fileMask[ksq]) ? 1 : 0;
+    int theirSemi = !(bitboards[(currentSide == white) ? p : P] & fileMask[ksq]) ? 1 : 0;
+    bonus.mgBonus -= kingOnFile[ourSemi][theirSemi][0];
+    bonus.egBonus -= kingOnFile[ourSemi][theirSemi][1];
 
     if (bonus.mgBonus > shelterScore.mgBonus)
     {
@@ -978,93 +999,170 @@ static inline int evaluatePassedPawn(int us, int s, int stageScore) {
     return interpolate(mg, eg, stageScore) - interpolate(PassedFile[0], PassedFile[1], stageScore) * edge;
 }
 
+// Pawn-structure mg/eg terms for a single pawn of colour `us` on square s, accumulated into
+// mgOut/egOut from us's perspective. Covers connected/phalanx, isolated, doubled (plus the
+// early-doubled case), backward, weak-lever and blocked-pawn terms. Depends only on the pawn
+// bitboards, so the aggregate is cacheable by pawn configuration. Material, PSQT and passed
+// pawns are handled by the caller.
+static inline void pawnStructureTerms(int us, int s, int &mgOut, int &egOut) {
+    int them = 1 - us;
+    U64 ourPawns   = bitboards[(us == white) ? P : p];
+    U64 theirPawns = bitboards[(us == white) ? p : P];
+    int up = (us == white) ? -8 : 8;        // one step toward promotion
+    int front = s + up;
+    int behind = s - up;
+
+    int r = relativeRank(us, getRank[s]);   // 0 = own first rank .. 7
+
+    U64 forwardFileUs   = (us == white) ? whiteOpposedMask[s] : blackOpposedMask[s];  // ahead, same file
+    U64 forwardFileThem = (us == white) ? blackOpposedMask[s] : whiteOpposedMask[s];  // behind, same file
+    U64 adjFiles        = adjacentFilesMask[getFile[s]];
+    int onBoardFront  = (front  >= 0 && front  < 64);
+    int onBoardBehind = (behind >= 0 && behind < 64);
+
+    U64 opposed    = theirPawns & forwardFileUs;
+    U64 blocked    = onBoardFront ? (theirPawns & (1ULL << front)) : 0;
+    U64 lever      = theirPawns & pawnAttacks[us][s];
+    U64 leverPush  = onBoardFront ? (theirPawns & pawnAttacks[us][front]) : 0;
+    U64 doubled    = onBoardBehind ? (ourPawns & (1ULL << behind)) : 0;
+    U64 neighbours = ourPawns & adjFiles;
+    U64 phalanx    = neighbours & rankMask[s];
+    U64 support    = onBoardBehind ? (neighbours & rankMask[behind]) : 0;
+
+    int mg = 0, eg = 0;
+
+    // additional penalty for an early doubled pawn the enemy has not fixed
+    if (doubled)
+    {
+        U64 themControl = theirPawns | pieceAttackTables[them][P];
+        U64 fixed = (us == white) ? (ourPawns & (themControl << 8))
+                                  : (ourPawns & (themControl >> 8));
+        if (!fixed)
+        {
+            mg += doubledEarlyPenalty[0];
+            eg += doubledEarlyPenalty[1];
+        }
+    }
+
+    // backward: no friendly neighbour can support the advance, and the push is stopped
+    U64 frontRanksThem = onBoardFront ? forwardRanksMasks[them][front] : 0;
+    int backward = (!(neighbours & frontRanksThem) && (leverPush | blocked)) ? 1 : 0;
+
+    if (support | phalanx)
+    {
+        int v = connectedPawnBonus[r] * (2 + (phalanx ? 1 : 0) - (opposed ? 1 : 0))
+              + 22 * countBits(support);
+        mg += v;
+        eg += v * (r - 2) / 4;
+    }
+    else if (!neighbours)
+    {
+        // isolated, unless it is a backward-style doubled pawn with an enemy pawn ahead
+        if (opposed && (ourPawns & forwardFileThem) && !(theirPawns & adjFiles))
+        {
+            mg += doublePawnPenalty[0];
+            eg += doublePawnPenalty[1];
+        }
+        else
+        {
+            int unopp = opposed ? 0 : 1;
+            mg += isolatedPawnPenalty[0] + weakUnopposed[0] * unopp;
+            eg += isolatedPawnPenalty[1] + weakUnopposed[1] * unopp;
+        }
+    }
+    else if (backward)
+    {
+        int f = getFile[s];
+        int notEdge = (f != 0 && f != 7) ? 1 : 0;
+        int unopp = opposed ? 0 : 1;
+        mg += backwardPawnPenalty[0] + weakUnopposed[0] * unopp * notEdge;
+        eg += backwardPawnPenalty[1] + weakUnopposed[1] * unopp * notEdge;
+    }
+
+    // a doubled pawn with no friendly support, and weak levers
+    if (!support)
+    {
+        int dbl = doubled ? 1 : 0;
+        int weakLev = (countBits(lever) > 1) ? 1 : 0;
+        mg += doublePawnPenalty[0] * dbl + WeakLever[0] * weakLev;
+        eg += doublePawnPenalty[1] * dbl + WeakLever[1] * weakLev;
+    }
+
+    // blocked pawn on the 5th or 6th rank
+    if (blocked && (r == 4 || r == 5))
+    {
+        int idx = r - 4;
+        mg -= blockedPawnBonus[idx][0];
+        eg -= blockedPawnBonus[idx][1];
+    }
+
+    mgOut += mg;
+    egOut += eg;
+}
+
+// Net pawn-structure mg/eg (white minus black) over all pawns. Depends only on pawn placement.
+static inline void computePawnStructure(int &netMg, int &netEg) {
+    netMg = 0;
+    netEg = 0;
+
+    U64 b = bitboards[P];
+    while (b) {
+        int s = getLSFBIndex(b);
+        pawnStructureTerms(white, s, netMg, netEg);
+        popBit(b, s);
+    }
+
+    int bmg = 0, beg = 0;
+    b = bitboards[p];
+    while (b) {
+        int s = getLSFBIndex(b);
+        pawnStructureTerms(black, s, bmg, beg);
+        popBit(b, s);
+    }
+    netMg -= bmg;
+    netEg -= beg;
+}
+
+// Pawn-structure score with a cache keyed by the pawn configuration. The structure terms
+// depend only on the pawn bitboards, so once computed for a (whitePawns, blackPawns) pair the
+// mg/eg totals are reused; the game-phase interpolation is applied per call since it depends
+// on non-pawn material.
+static inline int evaluatePawnStructureCached(int stageScore) {
+    U64 wp = bitboards[P], bp = bitboards[p];
+    U64 key = wp * 0x9E3779B97F4A7C15ULL + bp * 0xC2B2AE3D27D4EB4FULL;
+    int idx = (int)((key >> 32) & (PAWN_HASH_SIZE - 1));
+
+    PawnHashEntry &e = pawnHash[idx];
+    int netMg, netEg;
+    if (e.valid && e.wp == wp && e.bp == bp) {
+        netMg = e.mg;
+        netEg = e.eg;
+    } else {
+        computePawnStructure(netMg, netEg);
+        e.wp = wp; e.bp = bp; e.mg = netMg; e.eg = netEg; e.valid = true;
+    }
+    return interpolate(netMg, netEg, stageScore);
+}
+
 static inline int evaluateWhitePawn(int square, int stage, int stageScore)
 {
     int score = 0;
 
-    // Material and position score
+    // Material
     if (stage == middlegame) {
         score += interpolate(materialScore[opening][P], materialScore[endgame][P], stageScore);
     } else {
         score += materialScore[stage][P];
     }
 
-    // Double pawns evaluation
-    int doublePawns = countBits(bitboards[P] & fileMask[square]);
-    if (doublePawns > 1) {
-        if (stage == middlegame) {
-            score += interpolate(doublePawnPenalty[opening], doublePawnPenalty[endgame], stageScore);
-        } else {
-            score += doublePawnPenalty[stage];
-        }
-    }
-
     // Position score
     score += getPositionScore(P, square, stage, stageScore);
-
-    // Get if pawn is weak and unopposed
-    int isUnopposed = ((whiteOpposedMask[square] & bitboards[p]) == 0) ? 1 : 0;
 
     // Passed pawn evaluation
     score += evaluatePassedPawn(white, square, stageScore);
 
-    // Connected pawn calculations
-    int phalanx = ((phalanxMask[square] & bitboards[P]) != 0) ? 1 : 0;
-    int supported = ((whiteSupportMask[square] & bitboards[P]) != 0) ? 1 : 0;
-    int supportedCount = countBits(whiteSupportMask[square] & bitboards[P]);
-    // pawns can never legally be on rank 8 (square < 8) but guard the index
-    // anyway so a corrupt fen cannot read pawnAttacks out of bounds
-    int backwardPawns = ((supported == 0) && square >= 8 && (pawnAttacks[white][square - 8] & bitboards[p])) ? 1 : 0;
+    // Pawn structure is scored once per position (cached) in evaluate()
 
-    // Connected pawn bonus
-    if (supported | phalanx) {
-        score += connectedPawnBonus[getRank[square]] * (phalanx ? 3 : 2) /
-                 (!isUnopposed ? 2 : 1) + 17 * supportedCount;
-    }
-    // Isolated pawn penalty
-    else if ((bitboards[P] & isolatedMask[square]) == 0) {
-        int isolatedPen = 0;
-        int weakPen = 0;
-
-        if (stage == middlegame) {
-            isolatedPen = interpolate(isolatedPawnPenalty[opening], isolatedPawnPenalty[endgame], stageScore);
-            weakPen = interpolate(weakUnopposed[opening], weakUnopposed[endgame], stageScore);
-        } else {
-            isolatedPen = isolatedPawnPenalty[stage];
-            weakPen = weakUnopposed[stage];
-        }
-
-        score += isUnopposed ? (isolatedPen + weakPen) : isolatedPen;
-    }
-    // Backward pawn penalty
-    else if (backwardPawns) {
-        int backwardPen = 0;
-        int weakPen = 0;
-
-        if (stage == middlegame) {
-            backwardPen = interpolate(backwardPawnPenalty[opening], backwardPawnPenalty[endgame], stageScore);
-            weakPen = interpolate(weakUnopposed[opening], weakUnopposed[endgame], stageScore);
-        } else {
-            backwardPen = backwardPawnPenalty[stage];
-            weakPen = weakUnopposed[stage];
-        }
-
-        score += backwardPen + weakPen;
-    }
-    /*
-    // Calculate lever pawns (black pawns that attack this pawn)
-    U64 leverPawns = pawnAttacks[white][square] & bitboards[p];
-    int leverCount = countBits(leverPawns);
-
-    // Penalize weak levers (when pawn isn't supported by another pawn)
-    if (!supported && leverCount > 1) {
-        if (stage == middlegame) {
-            score += interpolate(WeakLever[opening], WeakLever[endgame], stageScore);
-        } else {
-            score += WeakLever[stage];
-        }
-    }
-    */
     return score;
 }
 
@@ -1072,93 +1170,21 @@ static inline int evaluateBlackPawn(int square, int stage, int stageScore)
 {
     int score = 0;
 
-    // Material and position score
+    // Material
     if (stage == middlegame) {
         score -= interpolate(materialScore[opening][P], materialScore[endgame][P], stageScore);
     } else {
         score -= materialScore[stage][P];
     }
 
-    // Double pawns evaluation
-    int doublePawns = countBits(bitboards[p] & fileMask[square]);
-    if (doublePawns > 1) {
-        if (stage == middlegame) {
-            score -= interpolate(doublePawnPenalty[opening], doublePawnPenalty[endgame], stageScore);
-        } else {
-            score -= doublePawnPenalty[stage];
-        }
-    }
-
     // Position score
     score -= getPositionScore(P, mirrorScore[square], stage, stageScore);
-
-    // Get if pawn is weak and unopposed
-    int isUnopposed = ((blackOpposedMask[square] & bitboards[P]) == 0) ? 1 : 0;
 
     // Passed pawn evaluation
     score -= evaluatePassedPawn(black, square, stageScore);
 
-    // Connected pawn calculations
-    int phalanx = ((phalanxMask[square] & bitboards[p]) != 0) ? 1 : 0;
-    int supported = ((blackSupportMask[square] & bitboards[p]) != 0) ? 1 : 0;
-    int supportedCount = countBits(blackSupportMask[square] & bitboards[p]);
-    // pawns can never legally be on rank 1 (square > 55) but guard the index
-    // anyway so a corrupt fen cannot read pawnAttacks out of bounds
-    int backwardPawns = ((supported == 0) && square <= 55 && (pawnAttacks[black][square + 8] & bitboards[P])) ? 1 : 0;
+    // Pawn structure is scored once per position (cached) in evaluate()
 
-    // Connected pawn bonus
-    if (supported | phalanx) {
-        score -= connectedPawnBonus[getRank[mirrorScore[square]]] * (phalanx ? 3 : 2) /
-                 (!isUnopposed ? 2 : 1) + 17 * supportedCount;
-    }
-    // Isolated pawn penalty
-    else if ((bitboards[p] & isolatedMask[square]) == 0) {
-        int isolatedPen = 0;
-        int weakPen = 0;
-
-        if (stage == middlegame) {
-            isolatedPen = interpolate(isolatedPawnPenalty[opening], isolatedPawnPenalty[endgame], stageScore);
-            weakPen = interpolate(weakUnopposed[opening], weakUnopposed[endgame], stageScore);
-        } else {
-            isolatedPen = isolatedPawnPenalty[stage];
-            weakPen = weakUnopposed[stage];
-        }
-
-        if (isUnopposed) {
-            score -= isolatedPen + weakPen;
-        } else {
-            score -= isolatedPen;
-        }
-    }
-    // Backward pawn penalty
-    else if (backwardPawns) {
-        int backwardPen = 0;
-        int weakPen = 0;
-
-        if (stage == middlegame) {
-            backwardPen = interpolate(backwardPawnPenalty[opening], backwardPawnPenalty[endgame], stageScore);
-            weakPen = interpolate(weakUnopposed[opening], weakUnopposed[endgame], stageScore);
-        } else {
-            backwardPen = backwardPawnPenalty[stage];
-            weakPen = weakUnopposed[stage];
-        }
-
-        score -= backwardPen + weakPen;
-    }
-    /*
-    // Calculate lever pawns (white pawns that attack this pawn)
-    U64 leverPawns = pawnAttacks[black][square] & bitboards[P];
-    int leverCount = countBits(leverPawns);
-
-    // Penalize weak levers (when pawn isn't supported by another pawn)
-    if (!supported && leverCount > 1) {
-        if (stage == middlegame) {
-            score -= interpolate(WeakLever[opening], WeakLever[endgame], stageScore);
-        } else {
-            score -= WeakLever[stage];
-        }
-    }
-    */
     return score;
 }
 
@@ -1187,9 +1213,6 @@ static inline int evaluateWhiteKnight(int square, int stage, int stageScore)
     } else {
         score += mobilityBonus[N][mobility][stage];
     }
-
-    // Knight adjustment based on pawn count
-    score += knightAdj[countBits(bitboards[P])];
 
     // Outpost bonus - knight on rank 4-6 protected by pawn and safe from enemy pawn attacks
     // Ranks 4-6
@@ -1263,9 +1286,6 @@ static inline int evaluateBlackKnight(int square, int stage, int stageScore)
     } else {
         score -= mobilityBonus[N][mobility][stage];
     }
-
-    // Knight adjustment based on pawn count
-    score -= knightAdj[countBits(bitboards[p])];
 
     // Outpost bonus - knight on rank 3-5 protected by pawn and safe from enemy pawn attacks
     // Ranks 3-5 for black
@@ -1484,21 +1504,36 @@ static inline int evaluateBlackBishop(int square, int stage, int stageScore) {
     return score;
 }
 
-// Bishop pair bonus (call this in your main evaluation function)
-static inline int evaluateBishopPair(int stage, int stageScore) {
-    int score = 0;
-
-    // Check if white has bishop pair
-    if (countBits(bitboards[B]) >= 2) {
-        score += interpolate(BishopPairBonus[0], BishopPairBonus[1], stageScore);
+// Second-degree polynomial material imbalance for one side and one phase (0 = mg, 1 = eg).
+// pc[colour][type] holds piece counts; index 0 is a flag for holding two bishops, then
+// 1=pawn..5=queen. Each piece type scores against our own other pieces (QuadraticOurs)
+// and the enemy's pieces (QuadraticTheirs).
+static inline int imbalanceSide(int us, const int pc[2][6], int phase) {
+    int them = 1 - us;
+    int bonus = 0;
+    for (int pt1 = 0; pt1 <= 5; pt1++) {
+        if (!pc[us][pt1])
+            continue;
+        int v = QuadraticOurs[pt1][pt1][phase] * pc[us][pt1];
+        for (int pt2 = 0; pt2 < pt1; pt2++)
+            v += QuadraticOurs[pt1][pt2][phase] * pc[us][pt2]
+               + QuadraticTheirs[pt1][pt2][phase] * pc[them][pt2];
+        bonus += pc[us][pt1] * v;
     }
+    return bonus;
+}
 
-    // Check if black has bishop pair
-    if (countBits(bitboards[b]) >= 2) {
-        score -= interpolate(BishopPairBonus[0], BishopPairBonus[1], stageScore);
-    }
-
-    return score;
+// Material imbalance from white's perspective.
+static inline int evaluateImbalance(int stageScore) {
+    int pc[2][6] = {
+        { countBits(bitboards[B]) > 1, countBits(bitboards[P]), countBits(bitboards[N]),
+          countBits(bitboards[B]),     countBits(bitboards[R]), countBits(bitboards[Q]) },
+        { countBits(bitboards[b]) > 1, countBits(bitboards[p]), countBits(bitboards[n]),
+          countBits(bitboards[b]),     countBits(bitboards[r]), countBits(bitboards[q]) }
+    };
+    int mg = (imbalanceSide(white, pc, 0) - imbalanceSide(black, pc, 0)) / 16;
+    int eg = (imbalanceSide(white, pc, 1) - imbalanceSide(black, pc, 1)) / 16;
+    return interpolate(mg, eg, stageScore);
 }
 
 static inline int evaluateWhiteRook(int square, int stage, int stageScore)
@@ -1513,7 +1548,6 @@ static inline int evaluateWhiteRook(int square, int stage, int stageScore)
     }
 
     score += getPositionScore(R, square, stage, stageScore);
-    score += rookAdj[countBits(bitboards[P])];
 
     // Get mobility and attacks
     int mobility = getMobility(R, square);
@@ -1575,7 +1609,6 @@ static inline int evaluateBlackRook(int square, int stage, int stageScore)
 
     // Use the correct piece index (R) and mirror the square
     score -= getPositionScore(R, mirrorScore[square], stage, stageScore);
-    score -= rookAdj[countBits(bitboards[p])];
 
     // Get mobility and attacks
     int mobility = getMobility(r, square);
@@ -1832,6 +1865,393 @@ static inline bool isInsufficientMaterial() {
     return false;
 }
 
+// non-pawn material (mg units) for a side
+static inline int nonPawnMaterial(int side) {
+    if (side == white)
+        return countBits(bitboards[N]) * materialScore[opening][N]
+             + countBits(bitboards[B]) * materialScore[opening][B]
+             + countBits(bitboards[R]) * materialScore[opening][R]
+             + countBits(bitboards[Q]) * materialScore[opening][Q];
+    return countBits(bitboards[n]) * materialScore[opening][N]
+         + countBits(bitboards[b]) * materialScore[opening][B]
+         + countBits(bitboards[r]) * materialScore[opening][R]
+         + countBits(bitboards[q]) * materialScore[opening][Q];
+}
+
+// light/dark colour of a square (0 or 1)
+static inline int squareColour(int s) { return (s & 1) ^ ((s >> 3) & 1); }
+
+// Chebyshev (king-move) distance between two squares
+static inline int chebyshevDistance(int s1, int s2) {
+    return std::max(abs(getFile[s1] - getFile[s2]), abs(getRank[s1] - getRank[s2]));
+}
+
+// Specialized scale factors for exact drawn / strongly-drawish material configurations.
+// Returns a scale factor in [0,64] (0 = dead draw), or -1 when no specialized rule applies.
+// Square comparisons from the reference are translated to rank/file logic for BTC's board.
+static inline int specializedScaleFactor(int strong, int weak) {
+    int BishopV = materialScore[opening][B];
+    int npmStrong = nonPawnMaterial(strong);
+    int npmWeak   = nonPawnMaterial(weak);
+
+    U64 strongPawns = bitboards[(strong == white) ? P : p];
+    U64 weakPawns   = bitboards[(weak == white) ? P : p];
+    int sPc = countBits(strongPawns);
+    int wPc = countBits(weakPawns);
+    int sK = getLSFBIndex(bitboards[(strong == white) ? K : k]);
+    int wK = getLSFBIndex(bitboards[(weak == white) ? K : k]);
+    int wPush = (weak == white) ? -8 : 8;       // weak pawn advance
+    U64 fileA = fileMask[a1], fileH = fileMask[h1];
+    U64 fileB = fileMask[b1], fileG = fileMask[g1];
+
+    // K and pawns vs lone K: all pawns on a single rook file, blocked by the king -> draw
+    if (npmStrong == 0 && sPc >= 2 && npmWeak == 0 && wPc == 0)
+    {
+        U64 span = (weak == white) ? whitePassedMask[wK] : blackPassedMask[wK];
+        if ((!(strongPawns & ~fileA) || !(strongPawns & ~fileH)) && !(strongPawns & ~span))
+            return 0;
+        return -1;
+    }
+
+    // KB and pawns vs K: wrong rook pawn / wrong-colour bishop draws
+    if (npmStrong == BishopV && sPc >= 1 && countBits(bitboards[(strong == white) ? B : b]) == 1)
+    {
+        int sB = getLSFBIndex(bitboards[(strong == white) ? B : b]);
+        if (!(strongPawns & ~fileA) || !(strongPawns & ~fileH))
+        {
+            int pf = getFile[getLSFBIndex(strongPawns)];
+            int qsq = (strong == white) ? pf : (56 + pf);     // strong's promotion square
+            if (squareColour(qsq) != squareColour(sB) && chebyshevDistance(qsq, wK) <= 1)
+                return 0;
+        }
+        U64 allP = strongPawns | weakPawns;
+        if ((!(allP & ~fileB) || !(allP & ~fileG)) && npmWeak == 0 && wPc >= 1)
+        {
+            int wpSq = (strong == white) ? getLSFBIndex(weakPawns) : getMSBIndex(weakPawns);
+            if (relativeRank(strong, getRank[wpSq]) == 6
+                && (strongPawns & (1ULL << (wpSq + wPush)))
+                && (squareColour(sB) != squareColour(wpSq) || sPc == 1))
+            {
+                int sd = chebyshevDistance(wpSq, sK), wd = chebyshevDistance(wpSq, wK);
+                if (relativeRank(strong, getRank[wK]) >= 6 && wd <= 2 && wd <= sd)
+                    return 0;
+            }
+        }
+        return -1;
+    }
+
+    // KBP vs KB: king blockades the pawn on the wrong colour, or opposite bishops
+    if (npmStrong == BishopV && sPc == 1 && npmWeak == BishopV && wPc == 0)
+    {
+        int spSq = getLSFBIndex(strongPawns);
+        int sB = getLSFBIndex(bitboards[(strong == white) ? B : b]);
+        int wB = getLSFBIndex(bitboards[(weak == white) ? B : b]);
+        U64 fwd = (strong == white) ? whiteOpposedMask[spSq] : blackOpposedMask[spSq];
+        if ((fwd & (1ULL << wK)) && (squareColour(wK) != squareColour(sB) || relativeRank(strong, getRank[wK]) <= 5))
+            return 0;
+        if (squareColour(sB) != squareColour(wB))
+            return 0;
+        return -1;
+    }
+
+    // KBP vs KN: king blockades the pawn on the wrong colour
+    if (npmStrong == BishopV && sPc == 1
+        && npmWeak == materialScore[opening][N] && wPc == 0
+        && countBits(bitboards[(weak == white) ? N : n]) == 1)
+    {
+        int spSq = getLSFBIndex(strongPawns);
+        int sB = getLSFBIndex(bitboards[(strong == white) ? B : b]);
+        if (getFile[wK] == getFile[spSq]
+            && relativeRank(strong, getRank[spSq]) < relativeRank(strong, getRank[wK])
+            && (squareColour(wK) != squareColour(sB) || relativeRank(strong, getRank[wK]) <= 5))
+            return 0;
+        return -1;
+    }
+
+    // KP vs KP: remove the weak pawn and probe the bitbase; if a draw without it, scale to draw
+    if (npmStrong == 0 && sPc == 1 && npmWeak == 0 && wPc == 1)
+    {
+        int spSq = getLSFBIndex(strongPawns);
+        int spFile = getFile[spSq];
+        int flipF = (spFile >= 4) ? 7 : 0;
+        int rkFlip = (strong == black) ? 56 : 0;
+        int nSK = sK ^ flipF ^ rkFlip;
+        int nWK = wK ^ flipF ^ rkFlip;
+        int nSP = spSq ^ flipF ^ rkFlip;
+        int stm = (side == strong) ? white : black;
+        if (getRank[nSP] >= 4 && getFile[nSP] != 0)   // pawn on the 5th+ and not a-file: too dangerous
+            return -1;
+        return kpkProbe(nSK, nSP, nWK, stm) ? -1 : 0;
+    }
+
+    return -1;
+}
+
+// Scale factor (0..64, 64 = no scaling) for the side that is ahead, used to discount
+// drawish endgames the winning side cannot actually convert: no-pawn material edges,
+// opposite-coloured bishops, single-flank rook endings and queen-vs-pieces. Mirrors the
+// scale-factor selection of a classical evaluator. `score` is the white-POV total.
+static inline int endgameScaleFactor(int score) {
+    const int NORMAL = 64;
+    int strong = (score > 0) ? white : black;
+    int weak   = 1 - strong;
+
+    int npmW = nonPawnMaterial(white), npmB = nonPawnMaterial(black);
+    int npmStrong = (strong == white) ? npmW : npmB;
+    int npmWeak   = (strong == white) ? npmB : npmW;
+
+    U64 strongPawns = bitboards[(strong == white) ? P : p];
+    U64 weakPawns   = bitboards[(strong == white) ? p : P];
+    int pawnsStrong = countBits(strongPawns);
+
+    int BishopV = materialScore[opening][B];   // 825
+    int RookV   = materialScore[opening][R];   // 1276
+
+    int sf = NORMAL;
+
+    // strong side has no pawns and only a small material edge: very hard or impossible to win
+    if (pawnsStrong == 0 && npmStrong - npmWeak <= BishopV)
+        sf = (npmStrong < RookV)   ? 0
+           : (npmWeak <= BishopV)  ? 4
+           :                         14;
+
+    // specialized scale factors for exact drawn material configurations
+    if (sf == NORMAL)
+    {
+        int spec = specializedScaleFactor(strong, weak);
+        if (spec >= 0)
+            sf = spec;
+    }
+
+    if (sf == NORMAL)
+    {
+        // a bare enemy king with rook-or-more is a trivial win; do not scale it down
+        if (countBits(occupancies[weak]) == 1 && npmStrong >= RookV)
+            return NORMAL;
+
+        int wb = countBits(bitboards[B]), bb = countBits(bitboards[b]);
+        int oppBishops = (wb == 1 && bb == 1 &&
+                          squareColour(getLSFBIndex(bitboards[B])) != squareColour(getLSFBIndex(bitboards[b])));
+
+        U64 allPawns = bitboards[P] | bitboards[p];
+        U64 qs = fileMask[a1] | fileMask[b1] | fileMask[c1] | fileMask[d1];
+        U64 ks = fileMask[e1] | fileMask[f1] | fileMask[g1] | fileMask[h1];
+        int bothFlanks = ((allPawns & qs) && (allPawns & ks)) ? 1 : 0;
+
+        if (oppBishops)
+        {
+            if (npmW == BishopV && npmB == BishopV)
+            {
+                int passed = 0;
+                U64 sp = strongPawns;
+                while (sp)
+                {
+                    int s = getLSFBIndex(sp);
+                    U64 span = (strong == white) ? whitePassedMask[s] : blackPassedMask[s];
+                    if (!(span & weakPawns)) passed++;
+                    popBit(sp, s);
+                }
+                sf = 18 + 4 * passed;
+            }
+            else
+                sf = 22 + 3 * countBits(occupancies[strong]);
+        }
+        else if (npmW == RookV && npmB == RookV
+                 && pawnsStrong - countBits(weakPawns) <= 1
+                 && (((ks & strongPawns) != 0) != ((qs & strongPawns) != 0))
+                 && (kingAttacks[getLSFBIndex(bitboards[(weak == white) ? K : k])] & weakPawns))
+            sf = 36;
+        else if (countBits(bitboards[Q]) + countBits(bitboards[q]) == 1)
+            sf = 37 + 3 * (countBits(bitboards[Q]) == 1 ? countBits(bitboards[b]) + countBits(bitboards[n])
+                                                        : countBits(bitboards[B]) + countBits(bitboards[N]));
+        else
+            sf = std::min(sf, 36 + 7 * pawnsStrong) - 4 * !bothFlanks;
+
+        sf -= 4 * !bothFlanks;
+    }
+
+    if (sf < 0) sf = 0;
+    if (sf > NORMAL) sf = NORMAL;
+    return sf;
+}
+
+// Specialized endgame knowledge.
+// Exact-ish evaluations for known low-material configurations, built from the strong side's
+// perspective then converted to white's perspective by the caller. Distances here are
+// Chebyshev (king-move distance), not BTC's Manhattan distance(). a1 is square 56.
+
+// drive the weak king toward the edge (27 in the centre .. 90 in a corner)
+static inline int pushToEdge(int s) {
+    int rd = std::min(getRank[s], 7 - getRank[s]);
+    int fd = std::min(getFile[s], 7 - getFile[s]);
+    return 90 - (7 * fd * fd / 2 + 7 * rd * rd / 2);
+}
+
+// drive the weak king toward the a1/h8 corners (0 on the a8-h1 diagonal .. 7 in those corners)
+static inline int pushToCorner(int s) {
+    return abs(7 - getRank[s] - getFile[s]);
+}
+
+// drive two pieces together / apart
+static inline int pushClose(int s1, int s2) { return 140 - 20 * chebyshevDistance(s1, s2); }
+static inline int pushAway(int s1, int s2)  { return 120 - pushClose(s1, s2); }
+
+// Exact evaluation for known material configurations that do not need a bitbase. Returns
+// true and sets valueWhite (white's perspective) when a configuration is recognised.
+static inline bool probeSpecializedEndgame(int &valueWhite) {
+    if (countBits(occupancies[both]) > 5)
+        return false;
+
+    const int knownWin = 10000;
+    int pawnEg  = materialScore[endgame][P];
+    int rookEg  = materialScore[endgame][R];
+    int queenEg = materialScore[endgame][Q];
+    int rookMg  = materialScore[opening][R];
+
+    for (int strong = white; strong <= black; strong++)
+    {
+        int weak = 1 - strong;
+        int sN = countBits(bitboards[strong == white ? N : n]);
+        int sB = countBits(bitboards[strong == white ? B : b]);
+        int sR = countBits(bitboards[strong == white ? R : r]);
+        int sQ = countBits(bitboards[strong == white ? Q : q]);
+        int sP = countBits(bitboards[strong == white ? P : p]);
+        int wN = countBits(bitboards[weak == white ? N : n]);
+        int wB = countBits(bitboards[weak == white ? B : b]);
+        int wR = countBits(bitboards[weak == white ? R : r]);
+        int wQ = countBits(bitboards[weak == white ? Q : q]);
+        int wP = countBits(bitboards[weak == white ? P : p]);
+
+        int npmStrong = nonPawnMaterial(strong);
+        int npmWeak   = nonPawnMaterial(weak);
+        int sK = getLSFBIndex(bitboards[strong == white ? K : k]);
+        int wK = getLSFBIndex(bitboards[weak == white ? K : k]);
+        int stmWeak   = (side == weak)   ? 1 : 0;
+        int stmStrong = (side == strong) ? 1 : 0;
+
+        int result = 0;
+        bool handled = false;
+
+        // weak side has a lone king
+        if (npmWeak == 0 && wP == 0)
+        {
+            if (sP == 0 && sN == 2 && sB == 0 && sR == 0 && sQ == 0)
+            {
+                result = 0;            // KNN vs K is a draw
+                handled = true;
+            }
+            else if (sP == 0 && sN == 1 && sB == 1 && sR == 0 && sQ == 0)
+            {
+                // KBN vs K: drive the king to the corner the bishop controls (a1 = sq 56)
+                int bsq = getLSFBIndex(bitboards[strong == white ? B : b]);
+                int driveKing = (squareColour(bsq) != squareColour(56)) ? (wK ^ 7) : wK;
+                result = (knownWin + 3520) + pushClose(sK, wK) + 420 * pushToCorner(driveKing);
+                handled = true;
+            }
+            else if (sP == 1 && npmStrong == 0 && sN == 0 && sB == 0 && sR == 0 && sQ == 0)
+            {
+                // KP vs K: probe the bitbase, normalizing so the strong side is white with
+                // its pawn on files a-d (flipFile = sq^7, flipRank = sq^56)
+                int pawnSq = getLSFBIndex(bitboards[strong == white ? P : p]);
+                int flipF = (getFile[pawnSq] >= 4) ? 7 : 0;
+                int nWK = sK ^ flipF, nWP = pawnSq ^ flipF, nBK = wK ^ flipF;
+                if (strong == black) { nWK ^= 56; nWP ^= 56; nBK ^= 56; }
+                int stm = (side == strong) ? white : black;
+
+                if (!kpkProbe(nWK, nWP, nBK, stm))
+                    result = 0;
+                else
+                    result = knownWin + pawnEg + getRank[nWP];
+                handled = true;
+            }
+            else if (npmStrong >= rookMg)
+            {
+                // KX vs K: enough material to mate; drive the king to the edge
+                result = npmStrong + sP * pawnEg + pushToEdge(wK) + pushClose(sK, wK);
+                U64 sbb = bitboards[strong == white ? B : b];
+                bool oppBishops = (sbb & lightSquares) && (sbb & darkSquares);
+                if (sQ || sR || (sB && sN) || oppBishops)
+                    result = std::min(result + knownWin, mateScore - 1);
+                handled = true;
+            }
+        }
+        // weak side has a king and a single pawn
+        else if (npmWeak == 0 && wP == 1)
+        {
+            int wPsq = getLSFBIndex(bitboards[weak == white ? P : p]);
+            int push = (weak == white) ? -8 : 8;             // weak pawn's advance direction
+            if (sP == 0 && sR == 1 && sN == 0 && sB == 0 && sQ == 0)
+            {
+                // KR vs KP
+                int sRsq = getLSFBIndex(bitboards[strong == white ? R : r]);
+                int qsq = (weak == white) ? getFile[wPsq] : (56 + getFile[wPsq]);
+                U64 strongFwd = (strong == white) ? whiteOpposedMask[sK] : blackOpposedMask[sK];
+
+                if (strongFwd & (1ULL << wPsq))
+                    result = rookEg - chebyshevDistance(sK, wPsq);
+                else if (chebyshevDistance(wK, wPsq) >= 3 + stmWeak && chebyshevDistance(wK, sRsq) >= 3)
+                    result = rookEg - chebyshevDistance(sK, wPsq);
+                else if (relativeRank(strong, getRank[wK]) <= 2
+                         && chebyshevDistance(wK, wPsq) == 1
+                         && relativeRank(strong, getRank[sK]) >= 3
+                         && chebyshevDistance(sK, wPsq) > 2 + stmStrong)
+                    result = 80 - 8 * chebyshevDistance(sK, wPsq);
+                else
+                    result = 200 - 8 * (chebyshevDistance(sK, wPsq + push)
+                                      - chebyshevDistance(wK, wPsq + push)
+                                      - chebyshevDistance(wPsq, qsq));
+                handled = true;
+            }
+            else if (sP == 0 && sQ == 1 && sN == 0 && sB == 0 && sR == 0)
+            {
+                // KQ vs KP: win unless a rook/bishop pawn on the 7th is guarded by the king
+                result = pushClose(sK, wK);
+                U64 bdeg = fileMask[b1] | fileMask[d1] | fileMask[e1] | fileMask[g1];
+                if (relativeRank(weak, getRank[wPsq]) != 6
+                    || chebyshevDistance(wK, wPsq) != 1
+                    || (bdeg & (1ULL << wPsq)))
+                    result += queenEg - pawnEg;
+                handled = true;
+            }
+            else if (sP == 0 && sN == 2 && sB == 0 && sR == 0 && sQ == 0)
+            {
+                // KNN vs KP: very drawish, small mating chances if the king is cornered
+                result = pawnEg + 2 * pushToEdge(wK) - 10 * relativeRank(weak, getRank[wPsq]);
+                handled = true;
+            }
+        }
+        // strong rook vs a single weak minor
+        else if (sP == 0 && sR == 1 && sN == 0 && sB == 0 && sQ == 0 && wP == 0)
+        {
+            if (wB == 1 && wN == 0 && wR == 0 && wQ == 0)
+            {
+                result = pushToEdge(wK);                       // KR vs KB, drawish
+                handled = true;
+            }
+            else if (wN == 1 && wB == 0 && wR == 0 && wQ == 0)
+            {
+                int wNsq = getLSFBIndex(bitboards[weak == white ? N : n]);
+                result = pushToEdge(wK) + pushAway(wK, wNsq);  // KR vs KN
+                handled = true;
+            }
+        }
+        // strong queen vs a single weak rook
+        else if (sP == 0 && sQ == 1 && sN == 0 && sB == 0 && sR == 0
+                 && wP == 0 && wR == 1 && wN == 0 && wB == 0 && wQ == 0)
+        {
+            result = queenEg - rookEg + pushToEdge(wK) + pushClose(sK, wK);
+            handled = true;
+        }
+
+        if (handled)
+        {
+            valueWhite = (strong == white) ? result : -result;
+            return true;
+        }
+    }
+    return false;
+}
+
 // evaluate a position
 static inline int evaluate()
 {
@@ -1858,6 +2278,11 @@ static inline int evaluate()
     } else {
         stage = middlegame;
     }
+
+    // Specialized endgame knowledge for known low-material configurations
+    int egExact;
+    if (probeSpecializedEndgame(egExact))
+        return (side == white) ? egExact : -egExact;
 
     // evaluation score
     int score = 0;
@@ -1909,23 +2334,30 @@ static inline int evaluate()
         }
     }
 
-    // Add threat score (Stockfish-style threats, computed once per side)
+    // Pawn structure (cached by pawn configuration)
+    score += evaluatePawnStructureCached(stageScore);
+
+    // Add threat score (computed once per side)
     score += evaluateThreats(white, stageScore) - evaluateThreats(black, stageScore);
 
     // Space (middlegame-only; the mg total decays toward the endgame via interpolation)
     score += interpolate(evaluateSpace(white, stageScore) - evaluateSpace(black, stageScore), 0, stageScore);
 
-    // bishop pair bonus
-    int bishopPair = evaluateBishopPair(stage, stageScore);
-    score += bishopPair;
+    // material imbalance (piece-pair interactions)
+    score += evaluateImbalance(stageScore);
 
-    // After calculating the full evaluation, adjust for near-draws
-    // Only if it's in endgame and not a mate score
-    /*
-    if (stage == endgame && !(score > mateScore || score < -mateScore)) {
-        score = adjustEndgameEvaluation(score);
+    // Endgame scale factor: discount the winning side's score in drawish endings. The factor
+    // applies to the endgame component, approximated here by tapering with the game phase so
+    // it is full strength in a pure endgame and a no-op in the opening.
+    int sf = endgameScaleFactor(score);
+    if (sf != 64)
+    {
+        int egWeight = openingPhaseScore - stageScore;
+        if (egWeight < 0) egWeight = 0;
+        long long num = (long long)openingPhaseScore * 64 - (long long)egWeight * (64 - sf);
+        score = (int)(((long long)score * num) / ((long long)openingPhaseScore * 64));
     }
-    */
+
     // Return final eval based on side
     int finalScore = (side == white) ? score : -score;
     //printf("Final evaluation score: %d\n", finalScore);

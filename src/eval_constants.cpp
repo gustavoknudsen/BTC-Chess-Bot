@@ -49,10 +49,6 @@ int materialScore[2][12] = {
 }
 };
 
-// material adjustment based on pawn number
-int knightAdj[9] = { -31, -25, -18, -12, -6,  0,  6, 12, 18 };
-int rookAdj[9] = { 23,  18,  14,  9,  5,  0, -5, -9, -14 };
-
 // double pawns penalty (values from old Stockfish, subject to change {mg, eg})
 int doublePawnPenalty[2] = {-11, -51};
 
@@ -81,6 +77,13 @@ int connectedPawnBonus[8] = {0, 3, 7, 7, 15, 54, 86, 0};
 int blockedPawnBonus[2][2] = {
     {19, 8},    // Rank 5
     {7, -3}     // Rank 6
+};
+
+// king on (semi-)open file penalty, indexed [our file semi-open][their file semi-open] {mg, eg}.
+// subtracted from the shelter bonus.
+int kingOnFile[2][2][2] = {
+    { { -18, 11 }, { -6, -3 } },
+    { {  -1,  5 }, {  8, -3 } }
 };
 
 // semi open file score (values from old Stockfish, subject to change {mg, eg})
@@ -222,7 +225,6 @@ int WeakQueen[2]               = { 57, 19 };
 int KingProtectorKnight[2]     = {  9,  9 };
 int OutpostBonusBishop[2]      = { 31, 25 };  // Outpost[1] for bishop
 int KingProtectorBishop[2]     = {  7,  9 };  // KingProtector[1] for bishop
-int BishopPairBonus[2]         = { 25, 50 };
 int WeakLever[2]               = { -2, -57};
 int BishopPawnsPenalty[4][2]   = {
     { 3, 8 }, // Edge distance 0 (a/h files)
@@ -231,6 +233,26 @@ int BishopPawnsPenalty[4][2]   = {
     { 3, 7 }  // Edge distance 3 (d/e files)
 };
 int CorneredBishop             = 50;      // Penalty for cornered bishop in Chess960
+
+// Polynomial material-imbalance tables {mg, eg}, indexed [piece1][piece2].
+// Index 0 is the "bishop pair" extended piece; 1=pawn, 2=knight, 3=bishop, 4=rook, 5=queen.
+// Only the lower triangle is used (piece2 <= piece1 for Ours, piece2 < piece1 for Theirs).
+int QuadraticOurs[6][6][2] = {
+    { {1419,1455}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0} },
+    { { 101,  28}, { 37,  39}, {0,0}, {0,0}, {0,0}, {0,0} },
+    { {  57,  64}, {249, 187}, { -49, -62}, {0,0}, {0,0}, {0,0} },
+    { {   0,   0}, {118, 137}, {  10,  27}, {   0,    0}, {0,0}, {0,0} },
+    { { -63, -68}, { -5,   3}, { 100,  81}, { 132,  118}, {-246,-244}, {0,0} },
+    { {-210,-211}, { 37,  14}, { 147, 141}, { 161,  105}, {-158,-174}, {-9,-31} }
+};
+int QuadraticTheirs[6][6][2] = {
+    { {0,0}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0} },
+    { { 33, 30}, {0,0}, {0,0}, {0,0}, {0,0}, {0,0} },
+    { { 46, 18}, {106,  84}, {0,0}, {0,0}, {0,0}, {0,0} },
+    { { 75, 35}, { 59,  44}, { 60, 15}, {0,0}, {0,0}, {0,0} },
+    { { 26, 35}, {  6,  22}, { 38, 39}, {-12, -2}, {0,0}, {0,0} },
+    { { 97, 93}, {100, 163}, {-58, -91}, {112, 192}, {276, 225}, {0,0} }
+};
 
 int ThreatByMinor[6][2] = {
     {  0,   0 },
