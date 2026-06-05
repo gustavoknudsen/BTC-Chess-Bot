@@ -25,6 +25,7 @@ extern int doublePawnPenalty[2];
 
 // Early doubled pawns (additional penalty when no enemy pawns fixed)
 extern int doubledEarlyPenalty[2];
+extern int kingOnFile[2][2][2];
 
 // Isolated pawn penalty
 extern int isolatedPawnPenalty[2];

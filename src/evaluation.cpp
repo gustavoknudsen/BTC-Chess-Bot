@@ -1,5 +1,8 @@
 #include "evaluation.h"
 
+// pawn-structure cache (keyed by pawn configuration; see evaluatePawnStructureCached)
+PawnHashEntry pawnHash[PAWN_HASH_SIZE];
+
 // set file or rank mask
 U64 setFileOrRankMask(int file, int rank)
 {

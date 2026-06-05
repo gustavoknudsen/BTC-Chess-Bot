@@ -28,6 +28,17 @@ struct kingShelter {
     int egBonus;
 };
 
+// cache of pawn-structure mg/eg totals keyed by the pawn configuration
+struct PawnHashEntry {
+    U64 wp;
+    U64 bp;
+    int mg;
+    int eg;
+    bool valid;
+};
+#define PAWN_HASH_SIZE (1 << 16)
+extern PawnHashEntry pawnHash[PAWN_HASH_SIZE];
+
 // set file or rank mask
 U64 setFileOrRankMask(int file, int rank);
 
@@ -475,6 +486,12 @@ static inline kingShelter getKingShelter(int currentSide, int ksq, kingShelter s
             bonus.mgBonus -= UnblockedStorm[d][theirRank];
         }
     }
+
+    // penalty for the king standing on a (semi-)open file
+    int ourSemi   = !(bitboards[(currentSide == white) ? P : p] & fileMask[ksq]) ? 1 : 0;
+    int theirSemi = !(bitboards[(currentSide == white) ? p : P] & fileMask[ksq]) ? 1 : 0;
+    bonus.mgBonus -= kingOnFile[ourSemi][theirSemi][0];
+    bonus.egBonus -= kingOnFile[ourSemi][theirSemi][1];
 
     if (bonus.mgBonus > shelterScore.mgBonus)
     {
@@ -978,93 +995,170 @@ static inline int evaluatePassedPawn(int us, int s, int stageScore) {
     return interpolate(mg, eg, stageScore) - interpolate(PassedFile[0], PassedFile[1], stageScore) * edge;
 }
 
+// Pawn-structure mg/eg terms for a single pawn of colour `us` on square s, accumulated into
+// mgOut/egOut from us's perspective. Covers connected/phalanx, isolated, doubled (plus the
+// early-doubled case), backward, weak-lever and blocked-pawn terms. Depends only on the pawn
+// bitboards, so the aggregate is cacheable by pawn configuration. Material, PSQT and passed
+// pawns are handled by the caller.
+static inline void pawnStructureTerms(int us, int s, int &mgOut, int &egOut) {
+    int them = 1 - us;
+    U64 ourPawns   = bitboards[(us == white) ? P : p];
+    U64 theirPawns = bitboards[(us == white) ? p : P];
+    int up = (us == white) ? -8 : 8;        // one step toward promotion
+    int front = s + up;
+    int behind = s - up;
+
+    int r = relativeRank(us, getRank[s]);   // 0 = own first rank .. 7
+
+    U64 forwardFileUs   = (us == white) ? whiteOpposedMask[s] : blackOpposedMask[s];  // ahead, same file
+    U64 forwardFileThem = (us == white) ? blackOpposedMask[s] : whiteOpposedMask[s];  // behind, same file
+    U64 adjFiles        = adjacentFilesMask[getFile[s]];
+    int onBoardFront  = (front  >= 0 && front  < 64);
+    int onBoardBehind = (behind >= 0 && behind < 64);
+
+    U64 opposed    = theirPawns & forwardFileUs;
+    U64 blocked    = onBoardFront ? (theirPawns & (1ULL << front)) : 0;
+    U64 lever      = theirPawns & pawnAttacks[us][s];
+    U64 leverPush  = onBoardFront ? (theirPawns & pawnAttacks[us][front]) : 0;
+    U64 doubled    = onBoardBehind ? (ourPawns & (1ULL << behind)) : 0;
+    U64 neighbours = ourPawns & adjFiles;
+    U64 phalanx    = neighbours & rankMask[s];
+    U64 support    = onBoardBehind ? (neighbours & rankMask[behind]) : 0;
+
+    int mg = 0, eg = 0;
+
+    // additional penalty for an early doubled pawn the enemy has not fixed
+    if (doubled)
+    {
+        U64 themControl = theirPawns | pieceAttackTables[them][P];
+        U64 fixed = (us == white) ? (ourPawns & (themControl << 8))
+                                  : (ourPawns & (themControl >> 8));
+        if (!fixed)
+        {
+            mg += doubledEarlyPenalty[0];
+            eg += doubledEarlyPenalty[1];
+        }
+    }
+
+    // backward: no friendly neighbour can support the advance, and the push is stopped
+    U64 frontRanksThem = onBoardFront ? forwardRanksMasks[them][front] : 0;
+    int backward = (!(neighbours & frontRanksThem) && (leverPush | blocked)) ? 1 : 0;
+
+    if (support | phalanx)
+    {
+        int v = connectedPawnBonus[r] * (2 + (phalanx ? 1 : 0) - (opposed ? 1 : 0))
+              + 22 * countBits(support);
+        mg += v;
+        eg += v * (r - 2) / 4;
+    }
+    else if (!neighbours)
+    {
+        // isolated, unless it is a backward-style doubled pawn with an enemy pawn ahead
+        if (opposed && (ourPawns & forwardFileThem) && !(theirPawns & adjFiles))
+        {
+            mg += doublePawnPenalty[0];
+            eg += doublePawnPenalty[1];
+        }
+        else
+        {
+            int unopp = opposed ? 0 : 1;
+            mg += isolatedPawnPenalty[0] + weakUnopposed[0] * unopp;
+            eg += isolatedPawnPenalty[1] + weakUnopposed[1] * unopp;
+        }
+    }
+    else if (backward)
+    {
+        int f = getFile[s];
+        int notEdge = (f != 0 && f != 7) ? 1 : 0;
+        int unopp = opposed ? 0 : 1;
+        mg += backwardPawnPenalty[0] + weakUnopposed[0] * unopp * notEdge;
+        eg += backwardPawnPenalty[1] + weakUnopposed[1] * unopp * notEdge;
+    }
+
+    // a doubled pawn with no friendly support, and weak levers
+    if (!support)
+    {
+        int dbl = doubled ? 1 : 0;
+        int weakLev = (countBits(lever) > 1) ? 1 : 0;
+        mg += doublePawnPenalty[0] * dbl + WeakLever[0] * weakLev;
+        eg += doublePawnPenalty[1] * dbl + WeakLever[1] * weakLev;
+    }
+
+    // blocked pawn on the 5th or 6th rank
+    if (blocked && (r == 4 || r == 5))
+    {
+        int idx = r - 4;
+        mg -= blockedPawnBonus[idx][0];
+        eg -= blockedPawnBonus[idx][1];
+    }
+
+    mgOut += mg;
+    egOut += eg;
+}
+
+// Net pawn-structure mg/eg (white minus black) over all pawns. Depends only on pawn placement.
+static inline void computePawnStructure(int &netMg, int &netEg) {
+    netMg = 0;
+    netEg = 0;
+
+    U64 b = bitboards[P];
+    while (b) {
+        int s = getLSFBIndex(b);
+        pawnStructureTerms(white, s, netMg, netEg);
+        popBit(b, s);
+    }
+
+    int bmg = 0, beg = 0;
+    b = bitboards[p];
+    while (b) {
+        int s = getLSFBIndex(b);
+        pawnStructureTerms(black, s, bmg, beg);
+        popBit(b, s);
+    }
+    netMg -= bmg;
+    netEg -= beg;
+}
+
+// Pawn-structure score with a cache keyed by the pawn configuration. The structure terms
+// depend only on the pawn bitboards, so once computed for a (whitePawns, blackPawns) pair the
+// mg/eg totals are reused; the game-phase interpolation is applied per call since it depends
+// on non-pawn material.
+static inline int evaluatePawnStructureCached(int stageScore) {
+    U64 wp = bitboards[P], bp = bitboards[p];
+    U64 key = wp * 0x9E3779B97F4A7C15ULL + bp * 0xC2B2AE3D27D4EB4FULL;
+    int idx = (int)((key >> 32) & (PAWN_HASH_SIZE - 1));
+
+    PawnHashEntry &e = pawnHash[idx];
+    int netMg, netEg;
+    if (e.valid && e.wp == wp && e.bp == bp) {
+        netMg = e.mg;
+        netEg = e.eg;
+    } else {
+        computePawnStructure(netMg, netEg);
+        e.wp = wp; e.bp = bp; e.mg = netMg; e.eg = netEg; e.valid = true;
+    }
+    return interpolate(netMg, netEg, stageScore);
+}
+
 static inline int evaluateWhitePawn(int square, int stage, int stageScore)
 {
     int score = 0;
 
-    // Material and position score
+    // Material
     if (stage == middlegame) {
         score += interpolate(materialScore[opening][P], materialScore[endgame][P], stageScore);
     } else {
         score += materialScore[stage][P];
     }
 
-    // Double pawns evaluation
-    int doublePawns = countBits(bitboards[P] & fileMask[square]);
-    if (doublePawns > 1) {
-        if (stage == middlegame) {
-            score += interpolate(doublePawnPenalty[opening], doublePawnPenalty[endgame], stageScore);
-        } else {
-            score += doublePawnPenalty[stage];
-        }
-    }
-
     // Position score
     score += getPositionScore(P, square, stage, stageScore);
-
-    // Get if pawn is weak and unopposed
-    int isUnopposed = ((whiteOpposedMask[square] & bitboards[p]) == 0) ? 1 : 0;
 
     // Passed pawn evaluation
     score += evaluatePassedPawn(white, square, stageScore);
 
-    // Connected pawn calculations
-    int phalanx = ((phalanxMask[square] & bitboards[P]) != 0) ? 1 : 0;
-    int supported = ((whiteSupportMask[square] & bitboards[P]) != 0) ? 1 : 0;
-    int supportedCount = countBits(whiteSupportMask[square] & bitboards[P]);
-    // pawns can never legally be on rank 8 (square < 8) but guard the index
-    // anyway so a corrupt fen cannot read pawnAttacks out of bounds
-    int backwardPawns = ((supported == 0) && square >= 8 && (pawnAttacks[white][square - 8] & bitboards[p])) ? 1 : 0;
+    // Pawn structure is scored once per position (cached) in evaluate()
 
-    // Connected pawn bonus
-    if (supported | phalanx) {
-        score += connectedPawnBonus[getRank[square]] * (phalanx ? 3 : 2) /
-                 (!isUnopposed ? 2 : 1) + 17 * supportedCount;
-    }
-    // Isolated pawn penalty
-    else if ((bitboards[P] & isolatedMask[square]) == 0) {
-        int isolatedPen = 0;
-        int weakPen = 0;
-
-        if (stage == middlegame) {
-            isolatedPen = interpolate(isolatedPawnPenalty[opening], isolatedPawnPenalty[endgame], stageScore);
-            weakPen = interpolate(weakUnopposed[opening], weakUnopposed[endgame], stageScore);
-        } else {
-            isolatedPen = isolatedPawnPenalty[stage];
-            weakPen = weakUnopposed[stage];
-        }
-
-        score += isUnopposed ? (isolatedPen + weakPen) : isolatedPen;
-    }
-    // Backward pawn penalty
-    else if (backwardPawns) {
-        int backwardPen = 0;
-        int weakPen = 0;
-
-        if (stage == middlegame) {
-            backwardPen = interpolate(backwardPawnPenalty[opening], backwardPawnPenalty[endgame], stageScore);
-            weakPen = interpolate(weakUnopposed[opening], weakUnopposed[endgame], stageScore);
-        } else {
-            backwardPen = backwardPawnPenalty[stage];
-            weakPen = weakUnopposed[stage];
-        }
-
-        score += backwardPen + weakPen;
-    }
-    /*
-    // Calculate lever pawns (black pawns that attack this pawn)
-    U64 leverPawns = pawnAttacks[white][square] & bitboards[p];
-    int leverCount = countBits(leverPawns);
-
-    // Penalize weak levers (when pawn isn't supported by another pawn)
-    if (!supported && leverCount > 1) {
-        if (stage == middlegame) {
-            score += interpolate(WeakLever[opening], WeakLever[endgame], stageScore);
-        } else {
-            score += WeakLever[stage];
-        }
-    }
-    */
     return score;
 }
 
@@ -1072,93 +1166,21 @@ static inline int evaluateBlackPawn(int square, int stage, int stageScore)
 {
     int score = 0;
 
-    // Material and position score
+    // Material
     if (stage == middlegame) {
         score -= interpolate(materialScore[opening][P], materialScore[endgame][P], stageScore);
     } else {
         score -= materialScore[stage][P];
     }
 
-    // Double pawns evaluation
-    int doublePawns = countBits(bitboards[p] & fileMask[square]);
-    if (doublePawns > 1) {
-        if (stage == middlegame) {
-            score -= interpolate(doublePawnPenalty[opening], doublePawnPenalty[endgame], stageScore);
-        } else {
-            score -= doublePawnPenalty[stage];
-        }
-    }
-
     // Position score
     score -= getPositionScore(P, mirrorScore[square], stage, stageScore);
-
-    // Get if pawn is weak and unopposed
-    int isUnopposed = ((blackOpposedMask[square] & bitboards[P]) == 0) ? 1 : 0;
 
     // Passed pawn evaluation
     score -= evaluatePassedPawn(black, square, stageScore);
 
-    // Connected pawn calculations
-    int phalanx = ((phalanxMask[square] & bitboards[p]) != 0) ? 1 : 0;
-    int supported = ((blackSupportMask[square] & bitboards[p]) != 0) ? 1 : 0;
-    int supportedCount = countBits(blackSupportMask[square] & bitboards[p]);
-    // pawns can never legally be on rank 1 (square > 55) but guard the index
-    // anyway so a corrupt fen cannot read pawnAttacks out of bounds
-    int backwardPawns = ((supported == 0) && square <= 55 && (pawnAttacks[black][square + 8] & bitboards[P])) ? 1 : 0;
+    // Pawn structure is scored once per position (cached) in evaluate()
 
-    // Connected pawn bonus
-    if (supported | phalanx) {
-        score -= connectedPawnBonus[getRank[mirrorScore[square]]] * (phalanx ? 3 : 2) /
-                 (!isUnopposed ? 2 : 1) + 17 * supportedCount;
-    }
-    // Isolated pawn penalty
-    else if ((bitboards[p] & isolatedMask[square]) == 0) {
-        int isolatedPen = 0;
-        int weakPen = 0;
-
-        if (stage == middlegame) {
-            isolatedPen = interpolate(isolatedPawnPenalty[opening], isolatedPawnPenalty[endgame], stageScore);
-            weakPen = interpolate(weakUnopposed[opening], weakUnopposed[endgame], stageScore);
-        } else {
-            isolatedPen = isolatedPawnPenalty[stage];
-            weakPen = weakUnopposed[stage];
-        }
-
-        if (isUnopposed) {
-            score -= isolatedPen + weakPen;
-        } else {
-            score -= isolatedPen;
-        }
-    }
-    // Backward pawn penalty
-    else if (backwardPawns) {
-        int backwardPen = 0;
-        int weakPen = 0;
-
-        if (stage == middlegame) {
-            backwardPen = interpolate(backwardPawnPenalty[opening], backwardPawnPenalty[endgame], stageScore);
-            weakPen = interpolate(weakUnopposed[opening], weakUnopposed[endgame], stageScore);
-        } else {
-            backwardPen = backwardPawnPenalty[stage];
-            weakPen = weakUnopposed[stage];
-        }
-
-        score -= backwardPen + weakPen;
-    }
-    /*
-    // Calculate lever pawns (white pawns that attack this pawn)
-    U64 leverPawns = pawnAttacks[black][square] & bitboards[P];
-    int leverCount = countBits(leverPawns);
-
-    // Penalize weak levers (when pawn isn't supported by another pawn)
-    if (!supported && leverCount > 1) {
-        if (stage == middlegame) {
-            score -= interpolate(WeakLever[opening], WeakLever[endgame], stageScore);
-        } else {
-            score -= WeakLever[stage];
-        }
-    }
-    */
     return score;
 }
 
@@ -1916,7 +1938,10 @@ static inline int evaluate()
         }
     }
 
-    // Add threat score (Stockfish-style threats, computed once per side)
+    // Pawn structure (cached by pawn configuration)
+    score += evaluatePawnStructureCached(stageScore);
+
+    // Add threat score (computed once per side)
     score += evaluateThreats(white, stageScore) - evaluateThreats(black, stageScore);
 
     // Space (middlegame-only; the mg total decays toward the endgame via interpolation)

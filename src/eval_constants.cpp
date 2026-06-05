@@ -79,6 +79,13 @@ int blockedPawnBonus[2][2] = {
     {7, -3}     // Rank 6
 };
 
+// king on (semi-)open file penalty, indexed [our file semi-open][their file semi-open] {mg, eg}.
+// subtracted from the shelter bonus.
+int kingOnFile[2][2][2] = {
+    { { -18, 11 }, { -6, -3 } },
+    { {  -1,  5 }, {  8, -3 } }
+};
+
 // semi open file score (values from old Stockfish, subject to change {mg, eg})
 int semiOpenFileScore[2] = {18, 7};
 
