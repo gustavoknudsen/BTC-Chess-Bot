@@ -66,6 +66,17 @@ int playedMoveStack[maxPly + 1];
 #define EVAL_NONE 100000
 int staticEvalStack[maxPly + 1];
 
+// correction history. records the signed gap between a node's static eval and
+// the value search actually returned, keyed by coarse features of the position
+// (pawn structure, and each side's non-pawn piece placement). a later node that
+// shares those features biases its static eval by the learned gap, so the
+// pruning and reduction heuristics work off a more accurate eval. these carry
+// across moves within a game and reset only on ucinewgame.
+#define CORR_SIZE (1 << 14)   // entries per table, power of 2
+#define CORR_LIMIT 1024       // per-entry bound; the gravity update saturates here
+static int16_t pawnCorrHist[CORR_SIZE][2];        // [pawnKey][sideToMove]
+static int16_t nonPawnCorrHist[2][CORR_SIZE][2];  // [pieceColor][nonPawnKey][sideToMove]
+
 // PV length [ply]
 int PVLength[maxPly];
 
@@ -99,6 +110,8 @@ void clearSearchHeuristics()
     memset(continuationHistory2, 0, sizeof(continuationHistory2));
     memset(counterMoves, 0, sizeof(counterMoves));
     memset(playedMoveStack, 0, sizeof(playedMoveStack));
+    memset(pawnCorrHist, 0, sizeof(pawnCorrHist));
+    memset(nonPawnCorrHist, 0, sizeof(nonPawnCorrHist));
 }
 
 // gravity update on a 16-bit history entry, bounded to [-HIST_MAX, HIST_MAX]
@@ -119,6 +132,76 @@ static inline int historyBonus(int depth)
     if (b > 1200) b = 1200;
     if (b < 0) b = 0;
     return b;
+}
+
+// correction-history table indices. the keys mix the relevant piece bitboards
+// the same way the pawn-structure cache does; collisions are tolerable because
+// the correction is only a heuristic nudge.
+static inline int pawnCorrIndex()
+{
+    U64 k = bitboards[P] * 0x9E3779B97F4A7C15ULL + bitboards[p] * 0xC2B2AE3D27D4EB4FULL;
+    return (int)((k >> 32) & (CORR_SIZE - 1));
+}
+
+static inline int nonPawnCorrIndex(int color)
+{
+    U64 k;
+    if (color == white)
+        k = bitboards[N] * 0x9E3779B97F4A7C15ULL + bitboards[B] * 0xC2B2AE3D27D4EB4FULL
+          + bitboards[R] * 0x165667B19E3779F9ULL + bitboards[Q] * 0xD6E8FEB86659FD93ULL
+          + bitboards[K] * 0xA0761D6478BD642FULL;
+    else
+        k = bitboards[n] * 0x9E3779B97F4A7C15ULL + bitboards[b] * 0xC2B2AE3D27D4EB4FULL
+          + bitboards[r] * 0x165667B19E3779F9ULL + bitboards[q] * 0xD6E8FEB86659FD93ULL
+          + bitboards[k] * 0xA0761D6478BD642FULL;
+    return (int)((k >> 32) & (CORR_SIZE - 1));
+}
+
+// blended correction for the current side to move, in eval units. the pawn
+// table is weighted a touch above each non-pawn table. the divisor caps the
+// total correction near a pawn so a bad entry cannot dominate the eval.
+#define CORR_WEIGHT_PAWN 6
+#define CORR_WEIGHT_NONPAWN 5
+#define CORR_NORM 128
+static inline int correctionValue()
+{
+    int pc  = pawnCorrHist[pawnCorrIndex()][side];
+    int wnp = nonPawnCorrHist[white][nonPawnCorrIndex(white)][side];
+    int bnp = nonPawnCorrHist[black][nonPawnCorrIndex(black)][side];
+    return (CORR_WEIGHT_PAWN * pc + CORR_WEIGHT_NONPAWN * (wnp + bnp)) / CORR_NORM;
+}
+
+// add the learned correction to a raw static eval, kept clear of mate scores.
+static inline int correctStaticEval(int eval)
+{
+    eval += correctionValue();
+    if (eval >  mateScore) eval =  mateScore;
+    if (eval < -mateScore) eval = -mateScore;
+    return eval;
+}
+
+// gravity update on a correction entry, bounded to [-CORR_LIMIT, CORR_LIMIT].
+static inline void updateCorrEntry(int16_t *entry, int bonus)
+{
+    if (bonus >  CORR_LIMIT) bonus =  CORR_LIMIT;
+    if (bonus < -CORR_LIMIT) bonus = -CORR_LIMIT;
+    int e = *entry;
+    e += bonus - e * abs(bonus) / CORR_LIMIT;
+    *entry = (int16_t)e;
+}
+
+// fold this node's static-eval error into the correction tables. the bonus is
+// the signed gap (search result minus corrected static eval) scaled by depth,
+// with a slightly larger weight when no move improved alpha (a fail-low carries
+// a cleaner upper-bound signal). bounded to a quarter of the entry range.
+static inline void updateCorrectionHistory(int corrected, int bestScore, int depth, int hasBestMove)
+{
+    int bonus = (bestScore - corrected) * depth * (hasBestMove ? 16 : 24) / 128;
+    if (bonus >  CORR_LIMIT / 4) bonus =  CORR_LIMIT / 4;
+    if (bonus < -CORR_LIMIT / 4) bonus = -CORR_LIMIT / 4;
+    updateCorrEntry(&pawnCorrHist[pawnCorrIndex()][side], bonus);
+    updateCorrEntry(&nonPawnCorrHist[white][nonPawnCorrIndex(white)][side], bonus);
+    updateCorrEntry(&nonPawnCorrHist[black][nonPawnCorrIndex(black)][side], bonus);
 }
 
 // find the enemy piece captured on a move's target square. returns -1 if the
@@ -413,7 +496,7 @@ static inline int quiescence(int alpha, int beta)
     if (ply > maxPly - 1)
         return evaluate();
 
-    int eval = evaluate();
+    int eval = correctStaticEval(evaluate());
 
     // stand-pat
     if (eval >= beta)
@@ -532,7 +615,12 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
         depth++;
 
     int legalMoves = 0;
-    int eval = evaluate();
+    int eval = correctStaticEval(evaluate());
+
+    // best score seen across this node's children, used to fold the static-eval
+    // error into correction history at node exit. tracked fail-soft (it can sit
+    // below alpha) so a fail-low still carries a usable bound.
+    int bestScore = -infinity;
 
     // improving heuristic. compare this node's static eval to our own static
     // eval two plies ago (falling back to four plies). improving = the eval is
@@ -831,6 +919,9 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
         if (stopped == 1)
             return 0;
 
+        if (score > bestScore)
+            bestScore = score;
+
         // bookkeep the move for cutoff bonus/malus
         if (getCapture(move))
         {
@@ -913,6 +1004,11 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
                     }
                 }
 
+                // a quiet move caused the cutoff: the position was better than
+                // the static eval said, so nudge correction history upward.
+                if (excludedMove == 0 && !inCheck && !getCapture(move) && bestScore > eval)
+                    updateCorrectionHistory(eval, bestScore, depth, 1);
+
                 return beta;
             }
         }
@@ -934,6 +1030,15 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
 
     if (excludedMove == 0)
         recordHash(alpha, depth, hashFlag, bestMove, bestMove);
+
+    // fold this node's static-eval error into correction history. update only
+    // when the error direction is consistent: a raised alpha (real best move)
+    // should mean the result beat the static eval, a fail-low should mean it
+    // did not. skip captures (noisy) and singular verification.
+    if (excludedMove == 0 && !inCheck && bestScore > -infinity
+        && !(bestMove && getCapture(bestMove))
+        && ((bestScore > eval) == (bestMove != 0)))
+        updateCorrectionHistory(eval, bestScore, depth, bestMove != 0);
 
     return alpha;
 }
