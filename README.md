@@ -7,7 +7,7 @@
     <img src="https://img.shields.io/badge/Protocol-UCI-informational" alt="UCI">
     <img src="https://img.shields.io/badge/CCRL%20Blitz-~2933-orange" alt="Strength">
   </p>
-  Last Release v2.7 - 09/06/2026
+  Last Release v2.7 - 9th June 2026
 </div>
 
 ---
