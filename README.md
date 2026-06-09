@@ -1,28 +1,55 @@
 
 <div align="center">
   <img src="logo.png" alt="BetterThanCris" width="200">
-  <h3>BetterThanCris Chess Bot</h3>
-	Last Release v2.6 - 29/05/2026
+  <h1>BetterThanCris</h1>
+  <p><b>A strong UCI chess engine written from scratch in performance-oriented C(++).</b></p>
+  <p>
+    <img src="https://img.shields.io/badge/Protocol-UCI-informational" alt="UCI">
+    <img src="https://img.shields.io/badge/CCRL%20Blitz-~2933-orange" alt="Strength">
+  </p>
+  Last Release v2.7 - 09/06/2026
 </div>
 
 ---
 
- Bot was written primarily in C but utilises a few C++ features. Most of the code is in `.cpp` files but follows C programming conventions and structure.
+BetterThanCris is a UCI chess engine built from scratch in performance-oriented C++. It uses alpha-beta search with the modern pruning and reduction techniques used by top engines with a full hand-crafted classical evaluation, reaching an estimated ~2930 CCRL Blitz strength (v2.7). Every change is validated by self-play A/B testing, and move generation is regression-tested against known perft node counts.
+
+The codebase is deliberately procedural and data-oriented. There are no classes or STL containers on the hot path, cache-friendly bitboard representation, and no hot-path allocation. It compiles as C++ and uses a handful of its conveniences (`std::min`/`max`/`clamp`, references, structs), but was written originally as a C engine.
+
 ## Table of Contents 
  1. [Introduction](#introduction)
- 2. [Strength](#strength)  
- 3. [Features](#features)
- 4. [To Do](#to-do)  
- 5. [Play BetterThanCris](#play-betterthancris)
- 6. [Releases](#releases) 
- 7. [Credits](#credits)
+ 2. [Why I Built This](#why-i-built-this)
+ 3. [Strength](#strength)  
+ 4. [Technical Highlights](#technical-highlights)
+ 5. [Features](#features)
+ 6. [To Do](#to-do)  
+ 7. [Play BetterThanCris](#play-betterthancris)
+ 8. [Releases](#releases) 
+ 9. [Credits](#credits)
 ## Introduction
- - Aggressive & Entertaining Chess
- - Created by Gustavo Knudsen
- - UCI Protocol Chess Engine
- - Current Version: 2.6
- - Is, In Fact, Better Than Cris
+ - UCI protocol chess engine, created by Gustavo Knudsen
+ - Strong classical engine: estimated 2933 CCRL Blitz, every feature self-play validated
+ - Magic-bitboard move generation, alpha-beta search, full hand-crafted evaluation
+ - Plays online on [Lichess](https://lichess.org/@/BetterThanCris) - not always online
+ - Current Version: 2.7
+ - Aggressive, entertaining chess, and is, in fact, Better Than Cris
+
+## Why I Built This
+
+I'm a big chess fan, and was interested by chess engines and the AI behind them. So I began devloping my first chess engine a few months after learning programming.
+
+I couldn't beat my friend Cris and instead of practising, I built an engine that could. It cleared that original goal a while ago. Many iterations later it now plays stronger than virtually every human on the planet, which feels a little surreal. It's my favourite project to work on, and there's always something new to improve.
+
 ## Strength
+**Version 2.7 (Latest)**
+- Estimated [CCRL](https://www.computerchess.org.uk/ccrl/404/) Blitz Rating ([Methodology / Data](https://docs.google.com/spreadsheets/d/1t2gDEfoMDtqAA5uL9U_GPA9CijjlMrVK4AR4DiAqqGU/edit?usp=sharing)): 2933 ± 17
+	- Conditions: 2+1 Blitz (CCRL Blitz Time Control), Single Thread (Intel i7-12650H), Standard Opening Book to Move 6, 4-Man Endgame Tablebases
+- A ~446+ gain over v2.6.  Due to a full evaluation overhaul and a search second pass (see [Releases](#releases))
+- [Lichess](https://lichess.org/@/BetterThanCris) (Playing Almost Exclusively Against Other Bots):
+	- Bullet: 2503 Peak, Blitz: 2506 Peak
+- Against Humans, Especially in Bullet or Blitz, Rating can be Expected to be Higher
+- [Sample Games](https://www.chess.com/analysis/collection/betterthancris-2-7-samples-games-2eHH42Fk2)
+
 **Version 2.6**
 - [CCRL](https://www.computerchess.org.uk/ccrl/404/) Blitz Rating [Estimate](https://docs.google.com/spreadsheets/d/1t2gDEfoMDtqAA5uL9U_GPA9CijjlMrVK4AR4DiAqqGU/edit?usp=sharing): 2487 ± 36
 - [Lichess](https://lichess.org/@/BetterThanCris) (Playing Almost Exclusively Against Other Bots):
@@ -36,6 +63,16 @@
 	- Bullet: 2301 Peak, Blitz: 2267 Peak
 - Against Humans, Especially in Bullet or Blitz, Rating can be Expected to be Higher
 - [Sample Games](https://www.chess.com/analysis/collection/betterthancris-2-6-samples-games-3AxpF6QA2)
+## Technical Highlights
+
+Full breakdown in [Features](#features).
+
+- **Bitboard engine with magic bitboards.** 64-bit board representation and perfect-hash (magic) lookups for sliding-piece attacks, with pre-computed attack tables.
+- **Alpha-beta search:** Iterative deepening with aspiration windows, a Zobrist-hashed transposition table (bucketed, depth-and-age replacement), and a Static-Exchange-Evaluation-ordered quiescence search.
+- **Modern search heuristics:** Late move reductions, null-move and reverse-futility pruning, late move and frontier-futility pruning, singular extensions, ProbCut, and correction history, plus five history tables (main, capture, continuation, pawn-structure, low-ply) for move ordering.
+- **Full classical evaluation:** King safety, mobility with pin detection and queen x-rays, threats, detailed passed pawns, a material imbalance table, pawn-hash-cached structure, space, and specialised endgame knowledge including a generated KPK bitbase.
+- **Engineering Process:** Every feature is validated by self-play A/B testing with measured Elo improvement. move generation is regression-tested against canonical perft node counts. Strength has climbed from ~2070 to an estimated ~2933 CCRL Blitz across recent versions.
+
 ## Features
  **General Features:**
  - UCI Protocol
@@ -70,6 +107,7 @@
  - Frontier Futility Pruning (Quiet Moves at Low Depth)
  - Late Move Pruning (LMP)
  - Razoring
+ - ProbCut (SEE-Filtered Capture, Qsearch-Verified Then Reduced Search Above a Raised Beta)
  - Internal Iterative Reductions (IIR)
  - Improving Heuristic (Gates LMP / RFP / LMR by `eval[ply] > eval[ply-2]`)
  - Late Move Reductions (LMR):
@@ -83,9 +121,13 @@
  - Gravity History:
 	- Main History (Quiet Moves)
 	- Capture History (By Captured Piece)
-	- 1-Ply Continuation History
-	- 2-Ply Continuation History
+	- 1-Ply & 2-Ply Continuation History
+	- Pawn-Structure History (Quiet Ordering Keyed by Pawn Structure)
+	- Low-Ply History (Per-Search Near-Root Ordering Table)
 	- Carryover Across Moves Within a Game
+ - Correction History:
+	- Pawn-Structure and Non-Pawn (Per-Colour) Static-Eval Correction Tables
+	- Biases the Static Eval by the Learned Eval-vs-Search Gap
  - Killer Moves
  - Counter-Move Heuristic
  - Transposition Table w/ Zobrist Hashing:
@@ -95,51 +137,56 @@
  - Single-Legal-Move Fast Path
 
 **Evaluation**
-- Material Evaluation
-- Piece-Square Tables
-- Tapered Evaluation
-- Pawn Structure:
-	- Double Pawns, Isolated Pawns, Backward Pawns
+- Unified Classical Evaluation Scale (Single Consistent Material / Positional Scale)
+- Material Evaluation + Piece-Square Tables, Tapered (Midgame / Endgame Interpolation)
+- Material Imbalance Table (Piece-Pair Polynomial, Subsumes the Bishop Pair)
+- Pawn Structure (Cached by a Pawn Hash):
+	- Doubled, Isolated, Backward, Blocked, Weak-Lever Pawns
 	- Connectivity: Phalanx & Supported Pawn Chains
-	- Passed Pawns
-- Mobility w/ X-Rays
-- Rook Open / Semi-Open Files
+	- King on Open / Semi-Open File
+- Detailed Passed Pawns:
+	- Rank / File Scaling, King-Race to the Stop Square, Path-to-Promotion Safety
+- Mobility:
+	- Pin-Excluded Mobility Area, X-Rays Through Queens
+- Threats:
+	- Threats by Minor / Rook / King / Pawn-Push, Hanging Pieces, Weak Queen
+	- Knight-on-Queen and Slider-on-Queen Forks
 - King Safety:
-	- Attackers & Attackers Value
+	- Sum-of-Contributions King Danger (Safe / Unsafe Checks, Weak King-Ring Squares, Slider Blockers)
+	- King-Flank Attack / Defense, Pawnless Flank, No-Enemy-Queen
 	- King Ring / Shelter Strength / Unblocked Pawn Storm
+- Space Evaluation (Safe Central Squares Behind Friendly Pawns)
+- Outposts, Rook Open / Semi-Open Files
+- Endgame Knowledge:
+	- Drawishness Scale Factors (Opposite-Colour Bishops, Single-Flank Rook Endings, Pawnless Edges)
+	- Specialised Exact Evals (KXK, KBNK, KNNK, KR / KQ vs Lone Piece) + a KPK Bitbase
 - Tempo
 
 ## To Do
 
-**Search (High Impact):**
-- Correction History
-- ProbCut
-- Pawn History / Low-Ply History
-- Razoring Tuning
-
-**Evaluation (High Impact):**
+**Next v2.8:**
+- Automated SPRT Testing Harness (fastchess / cute-chess-cli)
+	- Resolve Small Changes That Short Self-Play Matches Cannot
+- Lazy Evaluation / NPS:
+	- Skip Expensive Eval Terms When the Cheap Eval Is Far Outside the Window
+	- Cache More Eval (As With the Pawn Hash)
 - Texel / SPSA Tuning of Eval Weights
 	- Largest "Free Elo" Lever Without Eval Structure Changes
-- Improve King Safety Evaluation
-	- Tone Down the kingPenalty^2 / 4096 Quadratic
-	- Add Defending Pieces | Safe Checks | Mobility into Safety Calc
-- Complex Mobility w/ Pin Exclusion
-	- Re-attempt the Existing Scaffolding (Compute Pin Info Once Per Node)
-- NNUE (Long-Term)
-- Improve General Evaluation
-	- Outposts | Strong Squares | Piece Attacks | Passed Pawn Improvement | Trapped Pieces
-- Pattern Evaluations
-- Threat Evaluation
-- Space Evaluation
-- Improve Endgames
-	- Blockage | Draws | Known Endgames
+- Search-Constant Tuning (LMR / Null / Futility / Razoring / Aspiration / Singular)
+
+**Evaluation (Lower Priority):**
+- Initiative / Complexity Bonus (Needs an mg/eg Accumulator Refactor; Also Makes Endgame Scaling Exact)
+- Piece-on-King-Ring Bonuses, Outpost Rewrite to Mask Form
+
+**NNUE (v3.0 - Long-Term):**
+- HalfKP / HalfKAv2 Feature Transformer + SIMD Inference
+- Self-Play Training Data + Incremental Accumulator Updates
 
 **UCI & Infrastructure:**
 - Add Pondering Option
 - Add Multi-PV Search
 - Add Syzygy EGTB
 - Add Opening Book Support
-- Announce `Hash` Option in `uci` Reply (Currently Handled but Not Advertised)
 - Add Parallel Search / Lazy SMP
 
  
@@ -147,6 +194,27 @@
  - If online, can be played on  [Lichess](https://lichess.org/@/BetterThanCris) 
  - Can also be downloaded and ran like a normal UCI engine locally on a GUI
 ## Releases
+**Version 2.7 - 08/06/2026**
+- Major Evaluation Overhaul, Rebuilt on a Single Unified Classical Scale:
+	- Replaced the Mixed Material / Piece-Square Scale With One Consistent Scale and Removed All Ad-Hoc Rescaling
+		- Effect: Roughly 80% Score (35W 10D 5L Over 50 Games) vs the Pre-Overhaul Build
+	- Rewrote King Safety to a Sum-of-Contributions King Danger:
+		- Safe / Unsafe Checks, Weak King-Ring Squares, Slider Blockers, King-Flank Attack / Defense, Pawnless Flank, No-Enemy-Queen
+	- Rewrote Threats: Threats by Minor / Rook / King / Pawn-Push, Hanging, Weak Queen, Knight-on-Queen and Slider-on-Queen Forks
+	- Mobility With a Pin-Excluded Mobility Area and X-Rays Through Queens (53%)
+	- Detailed Passed Pawns With King-Race and Path-to-Promotion Safety (84%)
+	- Material Imbalance Table, Subsuming the Bishop Pair (58%)
+	- Pawn-Structure Rewrite + King-on-File + Pawn-Hash Cache (57%)
+	- Space Evaluation and Knight / Slider-on-Queen Threats (65% as a Batch)
+	- Endgame Scale Factors for Drawish Endings (58%)
+	- Specialised Endgames: Exact KXK / KBNK / KNNK / KR / KQ vs Lone Piece, Plus a KPK Bitbase
+- Search Second Pass:
+	- Correction History (Pawn and Non-Pawn Static-Eval Correction Tables): 56% (~+42 Elo)
+	- ProbCut (SEE-Filtered Capture, Qsearch-Verified Then Reduced Search Above a Raised Beta)
+	- Pawn-Structure History for Quiet Move Ordering: 57% (~+49 Elo)
+	- Low-Ply Near-Root History, Reset Per Search: 50.7%
+- Every Change Individually A/B-Validated in Self-Play
+
 **Version 2.6 - 29/05/2026**
 - Added Late Move Pruning (LMP):
 	- Skip Quiet Moves Once `movesSearched >= 3 + depth*depth` at depth <= 8
@@ -276,17 +344,19 @@
 - Simple Opening Book
 
 
- ## Credits
- I would have never been able to complete this project without the help of these resources:
- - Code Monkey King's [Bitboard CHESS ENGINE in C](https://www.youtube.com/playlist?list=PLmN0neTso3Jxh8ZIylk74JpwfiWNI76Cs) (Based Off Of)
- - [Chess Programming Wiki](https://www.chessprogramming.org/Main_Page) (For Almost Everything)
- - UCI Communication from Richard Allbert
- - Stockfish 10 [SRC](https://github.com/mcostalba/Stockfish/tree/master) for Inspiration of Evaluation and Evaluation Values
- - Strelka Chess Engine [SRC](https://github.com/FireFather/strelka) for Razoring
- - PeSTO's Evaluation Function by [Ronald Friederich](https://www.chessprogramming.org/Ronald_Friederich "Ronald Friederich")
- - TSCP by [Tom Kerrigan](https://www.chessprogramming.org/Tom_Kerrigan "Tom Kerrigan") for Inspiration and Guidance
- - Gaurav Pant's [Improving Search](https://www.youtube.com/watch?v=mVdh5z0jtAo&t=3993s&ab_channel=GauravPant) for Better Search
- - Sebastian Lague's [Chess Coding Adventure](https://youtube.com/playlist?list=PLFt_AvWsXl0cvHyu32ajwh2qU1i6hl77c&si=CyULwCJeNlQHIrk6)
- - Eddie Sharick's [Creating a Chess Engine in Python](https://youtube.com/playlist?list=PLBwF487qi8MGU81nDGaeNE1EnNEPYWKY_&si=q9vOJjGycpV9yHHK)
- - Bluefever Software's OG [Chess Engine in C](https://youtube.com/playlist?list=PLZ1QII7yudbc-Ky058TEaOstZHVbT-2hg&si=KjBemyRplDQps77r)
- - [Xorshift Algorithm](https://en.wikipedia.org/wiki/Xorshift)
+## Credits
+
+BetterThanCris began as a tutorial implementation and has since grown into a substantially original engine, far beyond where it started. These resources were invaluable along the way:
+
+**Foundations & learning:**
+- Code Monkey King's [Bitboard Chess Engine in C](https://www.youtube.com/playlist?list=PLmN0neTso3Jxh8ZIylk74JpwfiWNI76Cs): the tutorial the earliest version was built from
+- [Chess Programming Wiki](https://www.chessprogramming.org/Main_Page): reference for nearly every technique used here
+- Bluefever Software's [Chess Engine in C](https://youtube.com/playlist?list=PLZ1QII7yudbc-Ky058TEaOstZHVbT-2hg), Sebastian Lague's [Chess Coding Adventure](https://youtube.com/playlist?list=PLFt_AvWsXl0cvHyu32ajwh2qU1i6hl77c), Eddie Sharick's [Chess Engine in Python](https://youtube.com/playlist?list=PLBwF487qi8MGU81nDGaeNE1EnNEPYWKY_), and Gaurav Pant's [Improving Search](https://www.youtube.com/watch?v=mVdh5z0jtAo)
+
+**Engines & techniques referenced:**
+- [Stockfish](https://github.com/official-stockfish/Stockfish): classical-era evaluation structure and values
+- [Strelka](https://github.com/FireFather/strelka): razoring
+- [PeSTO's Evaluation](https://www.chessprogramming.org/PeSTO%27s_Evaluation_Function) by Ronald Friederich
+- [TSCP](https://www.chessprogramming.org/TSCP) by Tom Kerrigan
+- UCI protocol communication code by Richard Allbert
+- [Xorshift](https://en.wikipedia.org/wiki/Xorshift) PRNG

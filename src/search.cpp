@@ -54,6 +54,20 @@ int16_t captureHistory[12][64][12];
 int16_t continuationHistory[12][64][12][64];
 int16_t continuationHistory2[12][64][12][64];
 
+// pawn-structure history [pawnKey][piece][to]. orders quiet moves by how well
+// they did in similar pawn structures; an additive term in quiet move scoring.
+#define PAWN_HIST_SIZE 2048
+int16_t pawnHistory[PAWN_HIST_SIZE][12][64];
+// pawn-history index for the node currently being ordered. set once per node in
+// sortMoves so scoreMove does not recompute it per move.
+static int curPawnHistIndex;
+
+// low-ply history [ply][from][to]. a near-root quiet-move-ordering table that is
+// reset every search (unlike the persistent main history), so it reflects this
+// position's near-root cutoffs. only the first few plies are kept.
+#define LOW_PLY_SIZE 5
+int16_t lowPlyHistory[LOW_PLY_SIZE][64][64];
+
 // counter-move table [prevPiece][prevTo]. carries across moves like history.
 int counterMoves[12][64];
 
@@ -65,6 +79,17 @@ int playedMoveStack[maxPly + 1];
 // marks plies where we were in check (no usable static eval).
 #define EVAL_NONE 100000
 int staticEvalStack[maxPly + 1];
+
+// correction history. records the signed gap between a node's static eval and
+// the value search actually returned, keyed by coarse features of the position
+// (pawn structure, and each side's non-pawn piece placement). a later node that
+// shares those features biases its static eval by the learned gap, so the
+// pruning and reduction heuristics work off a more accurate eval. these carry
+// across moves within a game and reset only on ucinewgame.
+#define CORR_SIZE (1 << 14)   // entries per table, power of 2
+#define CORR_LIMIT 1024       // per-entry bound; the gravity update saturates here
+static int16_t pawnCorrHist[CORR_SIZE][2];        // [pawnKey][sideToMove]
+static int16_t nonPawnCorrHist[2][CORR_SIZE][2];  // [pieceColor][nonPawnKey][sideToMove]
 
 // PV length [ply]
 int PVLength[maxPly];
@@ -89,6 +114,10 @@ int followPV, scorePV;
 #define SCORE_COUNTER       600000
 #define SCORE_BAD_CAPTURE   (-1000000)
 
+// ProbCut: raised-beta margin in eval units (pawn = 126), shrunk when improving.
+#define PROBCUT_MARGIN 179
+#define PROBCUT_IMPROVING 46
+
 // reset all search-side heuristics. called at engine init and on ucinewgame.
 void clearSearchHeuristics()
 {
@@ -99,6 +128,9 @@ void clearSearchHeuristics()
     memset(continuationHistory2, 0, sizeof(continuationHistory2));
     memset(counterMoves, 0, sizeof(counterMoves));
     memset(playedMoveStack, 0, sizeof(playedMoveStack));
+    memset(pawnHistory, 0, sizeof(pawnHistory));
+    memset(pawnCorrHist, 0, sizeof(pawnCorrHist));
+    memset(nonPawnCorrHist, 0, sizeof(nonPawnCorrHist));
 }
 
 // gravity update on a 16-bit history entry, bounded to [-HIST_MAX, HIST_MAX]
@@ -119,6 +151,76 @@ static inline int historyBonus(int depth)
     if (b > 1200) b = 1200;
     if (b < 0) b = 0;
     return b;
+}
+
+// correction-history table indices. the keys mix the relevant piece bitboards
+// the same way the pawn-structure cache does; collisions are tolerable because
+// the correction is only a heuristic nudge.
+static inline int pawnCorrIndex()
+{
+    U64 k = bitboards[P] * 0x9E3779B97F4A7C15ULL + bitboards[p] * 0xC2B2AE3D27D4EB4FULL;
+    return (int)((k >> 32) & (CORR_SIZE - 1));
+}
+
+static inline int nonPawnCorrIndex(int color)
+{
+    U64 k;
+    if (color == white)
+        k = bitboards[N] * 0x9E3779B97F4A7C15ULL + bitboards[B] * 0xC2B2AE3D27D4EB4FULL
+          + bitboards[R] * 0x165667B19E3779F9ULL + bitboards[Q] * 0xD6E8FEB86659FD93ULL
+          + bitboards[K] * 0xA0761D6478BD642FULL;
+    else
+        k = bitboards[n] * 0x9E3779B97F4A7C15ULL + bitboards[b] * 0xC2B2AE3D27D4EB4FULL
+          + bitboards[r] * 0x165667B19E3779F9ULL + bitboards[q] * 0xD6E8FEB86659FD93ULL
+          + bitboards[k] * 0xA0761D6478BD642FULL;
+    return (int)((k >> 32) & (CORR_SIZE - 1));
+}
+
+// blended correction for the current side to move, in eval units. the pawn
+// table is weighted a touch above each non-pawn table. the divisor caps the
+// total correction near a pawn so a bad entry cannot dominate the eval.
+#define CORR_WEIGHT_PAWN 6
+#define CORR_WEIGHT_NONPAWN 5
+#define CORR_NORM 128
+static inline int correctionValue()
+{
+    int pc  = pawnCorrHist[pawnCorrIndex()][side];
+    int wnp = nonPawnCorrHist[white][nonPawnCorrIndex(white)][side];
+    int bnp = nonPawnCorrHist[black][nonPawnCorrIndex(black)][side];
+    return (CORR_WEIGHT_PAWN * pc + CORR_WEIGHT_NONPAWN * (wnp + bnp)) / CORR_NORM;
+}
+
+// add the learned correction to a raw static eval, kept clear of mate scores.
+static inline int correctStaticEval(int eval)
+{
+    eval += correctionValue();
+    if (eval >  mateScore) eval =  mateScore;
+    if (eval < -mateScore) eval = -mateScore;
+    return eval;
+}
+
+// gravity update on a correction entry, bounded to [-CORR_LIMIT, CORR_LIMIT].
+static inline void updateCorrEntry(int16_t *entry, int bonus)
+{
+    if (bonus >  CORR_LIMIT) bonus =  CORR_LIMIT;
+    if (bonus < -CORR_LIMIT) bonus = -CORR_LIMIT;
+    int e = *entry;
+    e += bonus - e * abs(bonus) / CORR_LIMIT;
+    *entry = (int16_t)e;
+}
+
+// fold this node's static-eval error into the correction tables. the bonus is
+// the signed gap (search result minus corrected static eval) scaled by depth,
+// with a slightly larger weight when no move improved alpha (a fail-low carries
+// a cleaner upper-bound signal). bounded to a quarter of the entry range.
+static inline void updateCorrectionHistory(int corrected, int bestScore, int depth, int hasBestMove)
+{
+    int bonus = (bestScore - corrected) * depth * (hasBestMove ? 16 : 24) / 128;
+    if (bonus >  CORR_LIMIT / 4) bonus =  CORR_LIMIT / 4;
+    if (bonus < -CORR_LIMIT / 4) bonus = -CORR_LIMIT / 4;
+    updateCorrEntry(&pawnCorrHist[pawnCorrIndex()][side], bonus);
+    updateCorrEntry(&nonPawnCorrHist[white][nonPawnCorrIndex(white)][side], bonus);
+    updateCorrEntry(&nonPawnCorrHist[black][nonPawnCorrIndex(black)][side], bonus);
 }
 
 // find the enemy piece captured on a move's target square. returns -1 if the
@@ -231,6 +333,14 @@ static inline void enablePVScoring(moves *moveList)
        scored by MVV/LVA, kept below quiets
 */
 
+// pawn-structure history index for the current position. keyed by the pawn
+// bitboards the same way the pawn-structure cache is.
+static inline int pawnHistIndex()
+{
+    U64 k = bitboards[P] * 0x9E3779B97F4A7C15ULL + bitboards[p] * 0xC2B2AE3D27D4EB4FULL;
+    return (int)((k >> 32) & (PAWN_HIST_SIZE - 1));
+}
+
 // score move function (for move ordering). does NOT include the TT best move
 // bonus; that is layered on by sortMoves.
 static inline int scoreMove(int move)
@@ -287,15 +397,26 @@ static inline int scoreMove(int move)
         return SCORE_COUNTER;
 
     // history-based scoring for quiet moves
-    return mainHistory[getPiece(move)][getTarget(move)]
-           + getContHist(move)
-           + getContHist2(move);
+    int quietScore = mainHistory[getPiece(move)][getTarget(move)]
+                   + getContHist(move)
+                   + getContHist2(move)
+                   + pawnHistory[curPawnHistIndex][getPiece(move)][getTarget(move)];
+
+    // near the root, weight the per-search low-ply table heavily, decaying with
+    // ply. the 4x base matches its dominance over main history in the reference.
+    if (ply < LOW_PLY_SIZE)
+        quietScore += 4 * lowPlyHistory[ply][getSource(move)][getTarget(move)] / (1 + ply);
+
+    return quietScore;
 }
 
 // sort moves (for better pruning). TT best move is bumped to top.
 static inline void sortMoves(moves *moveList, int best)
 {
     int moveScores[256];
+
+    // pawn structure is fixed for this node, so resolve its history index once.
+    curPawnHistIndex = pawnHistIndex();
 
     for (int count = 0; count < moveList->count; count++)
     {
@@ -413,7 +534,7 @@ static inline int quiescence(int alpha, int beta)
     if (ply > maxPly - 1)
         return evaluate();
 
-    int eval = evaluate();
+    int eval = correctStaticEval(evaluate());
 
     // stand-pat
     if (eval >= beta)
@@ -532,7 +653,12 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
         depth++;
 
     int legalMoves = 0;
-    int eval = evaluate();
+    int eval = correctStaticEval(evaluate());
+
+    // best score seen across this node's children, used to fold the static-eval
+    // error into correction history at node exit. tracked fail-soft (it can sit
+    // below alpha) so a fail-low still carries a usable bound.
+    int bestScore = -infinity;
 
     // improving heuristic. compare this node's static eval to our own static
     // eval two plies ago (falling back to four plies). improving = the eval is
@@ -589,6 +715,64 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
 
         if (score >= beta)
             return beta;
+    }
+
+    // ProbCut. if a good enough capture, verified by a qsearch and then a
+    // reduced search, beats a beta raised by a healthy margin, the node almost
+    // certainly fails high and we can prune it. skipped during singular
+    // verification, in check, at pv nodes, near mate, and when the TT already
+    // says this node falls short of the raised beta.
+    int probCutBeta = beta + PROBCUT_MARGIN - PROBCUT_IMPROVING * improving;
+    if (excludedMove == 0 && !pvNode && !inCheck && depth >= 5 && abs(beta) < mateScore
+        && !(ttHit && ttDepth >= depth - 3 && ttScore < probCutBeta))
+    {
+        // a candidate capture must gain enough material to lift the eval to
+        // probCutBeta. the gap is in eval units (pawn 126); SEE is on its own
+        // pawn-100 scale, so convert before thresholding.
+        int seeThreshold = (probCutBeta - eval) * 100 / 126;
+
+        moves moveList[1];
+        generateCaptures(moveList);
+        sortCaptures(moveList);
+
+        for (int count = 0; count < moveList->count; count++)
+        {
+            int move = moveList->moves[count];
+
+            if (!seeGe(move, seeThreshold))
+                continue;
+
+            copyBoard();
+            ply++;
+            repetitionIndex++;
+            repetitionTable[repetitionIndex] = hashKey;
+
+            if (makeMove(move, allMoves) == 0)
+            {
+                ply--;
+                repetitionIndex--;
+                continue;
+            }
+
+            playedMoveStack[ply] = move;
+
+            score = -quiescence(-probCutBeta, -probCutBeta + 1);
+            if (score >= probCutBeta)
+                score = -negamax(-probCutBeta, -probCutBeta + 1, depth - 4, 0);
+
+            ply--;
+            repetitionIndex--;
+            undoBoard();
+
+            if (stopped == 1)
+                return 0;
+
+            if (score >= probCutBeta)
+            {
+                recordHash(beta, depth - 3, hashFlagBeta, move, move);
+                return beta;
+            }
+        }
     }
 
     // razoring (Strelka-style) (skip during singular verification)
@@ -831,6 +1015,9 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
         if (stopped == 1)
             return 0;
 
+        if (score > bestScore)
+            bestScore = score;
+
         // bookkeep the move for cutoff bonus/malus
         if (getCapture(move))
         {
@@ -900,9 +1087,16 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
                     // 2-ply signal is noisier so it accumulates more slowly.
                     int bonus2 = bonus * 3 / 4;
 
+                    // pawn structure is fixed for this node; resolve once. the
+                    // pawn-history malus is gentler (half) than the bonus.
+                    int phIdx = pawnHistIndex();
+
                     updateHistoryEntry(&mainHistory[getPiece(move)][getTarget(move)], bonus);
                     updateContHist(move, bonus);
                     updateContHist2(move, bonus2);
+                    updateHistoryEntry(&pawnHistory[phIdx][getPiece(move)][getTarget(move)], bonus);
+                    if (ply < LOW_PLY_SIZE)
+                        updateHistoryEntry(&lowPlyHistory[ply][getSource(move)][getTarget(move)], bonus * 663 / 1024);
 
                     for (int i = 0; i < quietsCount - 1; i++)
                     {
@@ -910,8 +1104,16 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
                         updateHistoryEntry(&mainHistory[getPiece(badMove)][getTarget(badMove)], -bonus);
                         updateContHist(badMove, -bonus);
                         updateContHist2(badMove, -bonus2);
+                        updateHistoryEntry(&pawnHistory[phIdx][getPiece(badMove)][getTarget(badMove)], -bonus / 2);
+                        if (ply < LOW_PLY_SIZE)
+                            updateHistoryEntry(&lowPlyHistory[ply][getSource(badMove)][getTarget(badMove)], -bonus * 663 / 1024);
                     }
                 }
+
+                // a quiet move caused the cutoff: the position was better than
+                // the static eval said, so nudge correction history upward.
+                if (excludedMove == 0 && !inCheck && !getCapture(move) && bestScore > eval)
+                    updateCorrectionHistory(eval, bestScore, depth, 1);
 
                 return beta;
             }
@@ -935,6 +1137,15 @@ static inline int negamax(int alpha, int beta, int depth, int excludedMove)
     if (excludedMove == 0)
         recordHash(alpha, depth, hashFlag, bestMove, bestMove);
 
+    // fold this node's static-eval error into correction history. update only
+    // when the error direction is consistent: a raised alpha (real best move)
+    // should mean the result beat the static eval, a fail-low should mean it
+    // did not. skip captures (noisy) and singular verification.
+    if (excludedMove == 0 && !inCheck && bestScore > -infinity
+        && !(bestMove && getCapture(bestMove))
+        && ((bestScore > eval) == (bestMove != 0)))
+        updateCorrectionHistory(eval, bestScore, depth, bestMove != 0);
+
     return alpha;
 }
 
@@ -950,12 +1161,14 @@ void search(int depth)
     scorePV = 0;
 
     // killers and PV are ply-indexed; reset per-search. histories persist
-    // across moves and are only cleared on ucinewgame.
+    // across moves and are only cleared on ucinewgame. low-ply history is the
+    // exception: it is near-root and reset per search so it is never stale.
     memset(killerMoves, 0, sizeof(killerMoves));
     memset(PVTable, 0, sizeof(PVTable));
     memset(PVLength, 0, sizeof(PVLength));
     memset(playedMoveStack, 0, sizeof(playedMoveStack));
     memset(staticEvalStack, 0, sizeof(staticEvalStack));
+    memset(lowPlyHistory, 0, sizeof(lowPlyHistory));
 
     // bump TT generation so this search's stores are preferred over stale
     // entries from previous searches by the bucket replacement policy.
