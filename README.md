@@ -360,3 +360,9 @@ BetterThanCris began as a tutorial implementation and has since grown into a sub
 - [TSCP](https://www.chessprogramming.org/TSCP) by Tom Kerrigan
 - UCI protocol communication code by Richard Allbert
 - [Xorshift](https://en.wikipedia.org/wiki/Xorshift) PRNG
+
+## License
+
+BetterThanCris is licensed under the GNU General Public License v3.0, see [LICENSE](LICENSE).
+
+Copyright (C) 2024-2026 Gustavo Knudsen.
