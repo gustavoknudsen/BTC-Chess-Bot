@@ -23,19 +23,12 @@ refactored_*.txt
 .DS_Store
 Thumbs.db
 
-# claude code session files
-.claude/
-
-# reference material kept locally only
-.stockfish*/
-
 # texel tuning datasets (large, kept locally)
 *.epd
 *.epd.gz
 *.epd.zip
 
-# internal development context (handover for new chat sessions)
-HANDOVER.md
+# internal development context
 ROADMAP.md
 
 # uci client side files
