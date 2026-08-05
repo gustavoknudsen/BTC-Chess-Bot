@@ -170,7 +170,7 @@ Full breakdown in [Features](#features).
 
 ## To Do
 
-**Next v2.8:**
+**Next v2.9 (The Complete Classical Engine):**
 - Lazy Evaluation / NPS:
 	- Skip Expensive Eval Terms When the Cheap Eval Is Far Outside the Window
 	- Cache More Eval (As With the Pawn Hash)
@@ -186,11 +186,13 @@ Full breakdown in [Features](#features).
 - HalfKP / HalfKAv2 Feature Transformer + SIMD Inference
 - Self-Play Training Data + Incremental Accumulator Updates
 
-**UCI & Infrastructure:**
+**UCI Completeness (v2.9):**
 - Add Pondering Option
 - Add Multi-PV Search
 - Add Syzygy EGTB
 - Add Opening Book Support
+
+**Beyond NNUE (v3.x):**
 - Add Parallel Search / Lazy SMP
 
  
@@ -204,15 +206,21 @@ Changes through v2.7 were validated with fixed-length self-play matches of 45-10
 From v2.8 changes are accepted under SPRT, using a purpose-built harness (see [harness/](harness/)): elo0=0, elo1=5, α=β=0.05 for gains and elo0=-5, elo1=0 for simplifications, at 8+0.08 with a randomised UHO opening book, scored pentanomially over colour-reversed game pairs. The three marginal v2.7 search results were retested at elo0=0, elo1=15; verdicts are inline below.
 
 ## Releases
-**Version 2.8 - In Development**
-- Added SPRT Testing Harness (`harness/`): Parallel Matches, Independent Arbiter, Pentanomial SPRT, EPD / PGN Books, PGN Output
+**Version 2.8 - Testing Harness**
+
+Tooling rather than a strength release: the measurement capability the remaining classical work depends on, and the engine bugs building it exposed.
+
+- Added SPRT Testing Harness (`harness/`), Written From Scratch:
+	- Parallel Engine-vs-Engine Matches, Own UCI Process Layer and Independent Arbiter
+	- Pentanomial (Game-Pair) Sequential Probability Ratio Test
+	- EPD / PGN Opening Books, Adjudication, PGN Output, Anomaly Logging
 - Added Fixed-Nodes Search (`go nodes`) for Deterministic Testing
 - Fixed: `position` Command Overflowed a 2000-Byte Input Buffer Past ~Move 195, Desynchronising the Engine From the GUI
-	- Effect: Long Games Were an Effective Forfeit
+	- Effect: Long Games Were an Effective Forfeit (~0.9 Elo)
 - Fixed: `Move Overhead` Option Was Silently Ignored
 - Fixed: Engine Spun at Full CPU on Stdin EOF Instead of Exiting
 - Fixed: Root Position of Each Search Was Evaluated With Stale Mobility Areas
-- Retested Three Marginal v2.7 Results Under SPRT (Verdicts Inline Below)
+- Retested Three Marginal v2.7 Results Under SPRT (Verdicts Inline Below); All Three Kept
 
 **Version 2.7 - 08/06/2026**
 - Major Evaluation Overhaul, Rebuilt on a Single Unified Classical Scale:
