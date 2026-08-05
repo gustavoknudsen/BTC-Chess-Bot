@@ -43,6 +43,13 @@ extern int timeset;
 // variable to flag when the time is up
 extern int stopped;
 
+// UCI "go nodes" limit. zero means the search is not node limited.
+extern U64 nodeLimit;
+
+// cleared while the first iteration runs so that a very small node limit still
+// returns a searched move instead of an empty PV
+extern int nodeStopAllowed;
+
 /***********************************************
 <><><><><><><><><><><><><><><><><><><><><><><><>
 
@@ -71,6 +78,12 @@ static inline void communicate() {
 	// if time is up break here
     if(timeset == 1 && getTime() > stoptime) {
 		// tell engine to stop calculating
+		stopped = 1;
+	}
+
+	// node limited search. the check sits here so every search aborts at the
+	// same node counts, which is what makes a nodes based game reproducible.
+	if (nodeLimit && nodeStopAllowed && nodes >= nodeLimit) {
 		stopped = 1;
 	}
 

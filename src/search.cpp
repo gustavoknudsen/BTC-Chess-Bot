@@ -1157,6 +1157,10 @@ void search(int depth)
     nodes = 0;
     stopped = 0;
 
+    // a node limit must not abort the first iteration, or there would be no
+    // move to return. see communicate() in timeman.h.
+    nodeStopAllowed = 0;
+
     followPV = 0;
     scorePV = 0;
 
@@ -1326,6 +1330,10 @@ void search(int depth)
             stableCount = 0;
         prevBest  = curBest;
         prevScore = score;
+
+        // from here on a node limit may abort the search: there is a completed
+        // iteration behind us, so the PV holds a real move
+        nodeStopAllowed = 1;
     }
 
     printf("bestmove ");

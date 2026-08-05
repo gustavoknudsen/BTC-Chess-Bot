@@ -31,6 +31,12 @@ int timeset = 0;
 // variable to flag when the time is up
 int stopped = 0;
 
+// UCI "go nodes" limit, zero when the search is not node limited
+U64 nodeLimit = 0;
+
+// gate on the node limit, see timeman.h
+int nodeStopAllowed = 0;
+
 // leaf nodes (number of positions in test)
 U64 nodes = 0;
 int counter = 0;

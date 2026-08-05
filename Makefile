@@ -5,6 +5,8 @@
 #   make build      - build the optimised engine (btc<version>.exe)
 #   make debug      - build with -O0 -g (btc<version>_debug.exe)
 #   make perft      - build the perft test driver (test_perft.exe)
+#   make sprt       - build the SPRT match harness (sprt.exe)
+#   make sprt-test  - build the harness and run its self test
 #   make test       - run perft on a few positions and check the totals
 #                     against the canonical node counts
 #   make clean      - remove all build artefacts
@@ -55,12 +57,28 @@ SRCS_NO_MAIN := $(filter-out $(SRC_DIR)/main.cpp,$(SRCS))
 # Header files, so header edits trigger a rebuild
 HDRS := $(wildcard $(SRC_DIR)/*.h)
 
+HARNESS_DIR := harness
+
+# SPRT harness sources. The harness is a standalone tool: it links none of
+# src/, on purpose, so its arbiter cannot inherit an engine move generation bug.
+HARNESS_SRCS :=     $(HARNESS_DIR)/board.cpp     $(HARNESS_DIR)/book.cpp     $(HARNESS_DIR)/engine.cpp     $(HARNESS_DIR)/game.cpp     $(HARNESS_DIR)/log.cpp     $(HARNESS_DIR)/main.cpp     $(HARNESS_DIR)/match.cpp     $(HARNESS_DIR)/options.cpp     $(HARNESS_DIR)/pgn.cpp     $(HARNESS_DIR)/platform.cpp     $(HARNESS_DIR)/process.cpp     $(HARNESS_DIR)/sprt.cpp
+
+HARNESS_HDRS := $(wildcard $(HARNESS_DIR)/*.h)
+
+# threads come from the system on Windows and from pthreads elsewhere
+ifeq ($(OS),Windows_NT)
+    HARNESS_LIBS :=
+else
+    HARNESS_LIBS := -lpthread
+endif
+
 ENGINE        := btc$(ENGINE_VERSION_TAG).exe
 ENGINE_DEBUG  := btc$(ENGINE_VERSION_TAG)_debug.exe
 PERFT         := test_perft.exe
 TUNER         := texel.exe
+HARNESS       := sprt.exe
 
-.PHONY: all build debug perft test tuner clean
+.PHONY: all build debug perft test tuner sprt sprt-test clean
 
 all: build
 
@@ -78,6 +96,17 @@ perft: $(PERFT)
 
 $(PERFT): $(TESTS_DIR)/test_perft.cpp $(SRCS_NO_MAIN) $(HDRS)
 	$(CXX) $(CXXFLAGS) -o $@ $(TESTS_DIR)/test_perft.cpp $(SRCS_NO_MAIN)
+
+# SPRT match harness: plays engine against engine and applies the sequential
+# test to the results. Independent of the engine build.
+sprt: $(HARNESS)
+
+$(HARNESS): $(HARNESS_SRCS) $(HARNESS_HDRS)
+	$(CXX) $(CXXFLAGS) -o $@ $(HARNESS_SRCS) $(HARNESS_LIBS)
+
+# Arbiter perft, notation round trips, statistics and book parsing.
+sprt-test: $(HARNESS)
+	./$(HARNESS) -selftest
 
 # Texel tuning driver: links the engine eval (no main.cpp) with its own main.
 tuner: $(TUNER)
@@ -100,7 +129,7 @@ test: $(PERFT)
 	@rm -f perft_out.txt
 
 clean:
-	-rm -f $(ENGINE) $(ENGINE_DEBUG) $(PERFT)
+	-rm -f $(ENGINE) $(ENGINE_DEBUG) $(PERFT) $(HARNESS)
 	-rm -f engine.exe engine_debug.exe
 	-rm -f engine_current.exe engine_no_contempt.exe engine_old_time.exe engine_baseline.exe
 	-rm -f engine43.exe engine52.exe

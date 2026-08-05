@@ -175,6 +175,8 @@ void resetTimeControl()
 {
     // reset timing
     quit = 0;
+    nodeLimit = 0;
+    nodeStopAllowed = 0;
     movestogo = 30;
     movetime = -1;
     time = -1;
@@ -242,6 +244,12 @@ void parseGo(const char *command)
     {
         // parse amount of time allowed to spend to make a move
         movetime = atoi(argument + 9);
+    }
+
+    // match UCI "nodes" command, a fixed node search
+    if ((argument = strstr(command, "nodes")))
+    {
+        nodeLimit = (U64)atoll(argument + 6);
     }
 
     // for fixed depth search

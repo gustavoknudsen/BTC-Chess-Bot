@@ -12,7 +12,7 @@
 
 ---
 
-BetterThanCris is a UCI chess engine built from scratch in performance-oriented C++. It uses alpha-beta search with the modern pruning and reduction techniques used by top engines with a full hand-crafted classical evaluation, reaching an estimated ~2930 CCRL Blitz strength (v2.7). Every change is validated by self-play A/B testing, and move generation is regression-tested against known perft node counts.
+BetterThanCris is a UCI chess engine built from scratch in performance-oriented C(++). It uses alpha-beta search with the modern pruning and reduction techniques used by top engines with a full hand-crafted classical evaluation, reaching an estimated ~2930 CCRL Blitz strength (v2.7). Every change is validated by self-play A/B testing, and move generation is regression-tested against known perft node counts.
 
 The codebase is deliberately procedural and data-oriented. There are no classes or STL containers on the hot path, cache-friendly bitboard representation, and no hot-path allocation. It compiles as C++ and uses a handful of its conveniences (`std::min`/`max`/`clamp`, references, structs), but was written originally as a C engine.
 
@@ -71,11 +71,13 @@ Full breakdown in [Features](#features).
 - **Alpha-beta search:** Iterative deepening with aspiration windows, a Zobrist-hashed transposition table (bucketed, depth-and-age replacement), and a Static-Exchange-Evaluation-ordered quiescence search.
 - **Modern search heuristics:** Late move reductions, null-move and reverse-futility pruning, late move and frontier-futility pruning, singular extensions, ProbCut, and correction history, plus five history tables (main, capture, continuation, pawn-structure, low-ply) for move ordering.
 - **Full classical evaluation:** King safety, mobility with pin detection and queen x-rays, threats, detailed passed pawns, a material imbalance table, pawn-hash-cached structure, space, and specialised endgame knowledge including a generated KPK bitbase.
-- **Engineering Process:** Every feature is validated by self-play A/B testing with measured Elo improvement. move generation is regression-tested against canonical perft node counts. Strength has climbed from ~2070 to an estimated ~2933 CCRL Blitz across recent versions.
+- **Purpose-built SPRT test harness:** A standalone match runner (`harness/`) that plays parallel engine-vs-engine matches, judges them with its own independent arbiter, and applies a pentanomial sequential probability ratio test, so changes worth a few Elo can be measured rather than guessed at.
+- **Engineering Process:** Every feature is validated by self-play A/B testing with measured Elo improvement. Move generation is regression-tested against canonical perft node counts, and the harness arbiter against the same counts independently. Strength has climbed from ~2070 to an estimated ~2933 CCRL Blitz across recent versions.
 
 ## Features
  **General Features:**
- - UCI Protocol
+ - UCI Protocol:
+	- Fixed Depth, Movetime, and Fixed-Nodes (`go nodes`) Search Modes
  - Bitboard Board Representation
  - Pre-Calculated Attack Tables:
 	 - Pre-Calculated Attack Tables Generator (Off by Default)
@@ -87,6 +89,10 @@ Full breakdown in [Features](#features).
 	- Skip Iterations That Cannot Finish in Budget
 	- Best-Move-Stability Shrink + Fail-Low Extension
 - Perft Test
+- SPRT Testing Harness (`harness/`):
+	- Parallel Engine-vs-Engine Matches, Own UCI Process and Arbiter Layer
+	- Pentanomial (Game-Pair) Sequential Probability Ratio Test
+	- EPD / PGN Opening Books, Adjudication, PGN Output, Anomaly Logging
 	 
  **Search:**
  - Negamax Search w/ Alpha Beta Pruning
@@ -165,8 +171,6 @@ Full breakdown in [Features](#features).
 ## To Do
 
 **Next v2.8:**
-- Automated SPRT Testing Harness (fastchess / cute-chess-cli)
-	- Resolve Small Changes That Short Self-Play Matches Cannot
 - Lazy Evaluation / NPS:
 	- Skip Expensive Eval Terms When the Cheap Eval Is Far Outside the Window
 	- Cache More Eval (As With the Pawn Hash)

@@ -36,3 +36,6 @@ ROADMAP.md
 
 # misc
 *.log
+
+# opening books for the sprt harness (large, kept locally)
+books/
