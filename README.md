@@ -31,7 +31,7 @@ The codebase is deliberately procedural and data-oriented. There are no classes 
  - Strong classical engine: estimated 2933 CCRL Blitz, every feature self-play validated
  - Magic-bitboard move generation, alpha-beta search, full hand-crafted evaluation
  - Plays online on [Lichess](https://lichess.org/@/BetterThanCris) - not always online
- - Current Version: 2.7
+ - Current Version: 2.8
  - Aggressive, entertaining chess, and is, in fact, Better Than Cris
 
 ## Why I Built This
