@@ -42,7 +42,7 @@ I couldn't beat my friend Cris and instead of practising, I built an engine that
 
 ## Strength
 **Version 2.7 (Latest)**
-- Estimated [CCRL](https://www.computerchess.org.uk/ccrl/404/) Blitz Rating ([Methodology / Data](https://docs.google.com/spreadsheets/d/1t2gDEfoMDtqAA5uL9U_GPA9CijjlMrVK4AR4DiAqqGU/edit?usp=sharing)): 2933 ± 17
+- Estimated [CCRL](https://www.computerchess.org.uk/ccrl/404/) Blitz Rating ([Methodology / Data](https://docs.google.com/spreadsheets/d/1t2gDEfoMDtqAA5uL9U_GPA9CijjlMrVK4AR4DiAqqGU/edit?usp=sharing)): 2933 ± 33
 	- Conditions: 2+1 Blitz (CCRL Blitz Time Control), Single Thread (Intel i7-12650H), Standard Opening Book to Move 6, 4-Man Endgame Tablebases
 - A ~446+ gain over v2.6.  Due to a full evaluation overhaul and a search second pass (see [Releases](#releases))
 - [Lichess](https://lichess.org/@/BetterThanCris) (Playing Almost Exclusively Against Other Bots):
@@ -197,7 +197,23 @@ Full breakdown in [Features](#features).
 ## Play BetterThanCris
  - If online, can be played on  [Lichess](https://lichess.org/@/BetterThanCris) 
  - Can also be downloaded and ran like a normal UCI engine locally on a GUI
+## Testing Methodology
+
+Changes through v2.7 were validated with fixed-length self-play matches of 45-100 games at 2+1. The standard error on the score at those sample sizes is roughly ±5%, so results below about 55% are directional only; sample sizes are given per result below where they were recorded.
+
+From v2.8 changes are accepted under SPRT, using a purpose-built harness (see [harness/](harness/)): elo0=0, elo1=5, α=β=0.05 for gains and elo0=-5, elo1=0 for simplifications, at 8+0.08 with a randomised UHO opening book, scored pentanomially over colour-reversed game pairs. The three marginal v2.7 search results were retested at elo0=0, elo1=15; verdicts are inline below.
+
 ## Releases
+**Version 2.8 - In Development**
+- Added SPRT Testing Harness (`harness/`): Parallel Matches, Independent Arbiter, Pentanomial SPRT, EPD / PGN Books, PGN Output
+- Added Fixed-Nodes Search (`go nodes`) for Deterministic Testing
+- Fixed: `position` Command Overflowed a 2000-Byte Input Buffer Past ~Move 195, Desynchronising the Engine From the GUI
+	- Effect: Long Games Were an Effective Forfeit
+- Fixed: `Move Overhead` Option Was Silently Ignored
+- Fixed: Engine Spun at Full CPU on Stdin EOF Instead of Exiting
+- Fixed: Root Position of Each Search Was Evaluated With Stale Mobility Areas
+- Retested Three Marginal v2.7 Results Under SPRT (Verdicts Inline Below)
+
 **Version 2.7 - 08/06/2026**
 - Major Evaluation Overhaul, Rebuilt on a Single Unified Classical Scale:
 	- Replaced the Mixed Material / Piece-Square Scale With One Consistent Scale and Removed All Ad-Hoc Rescaling
@@ -205,18 +221,21 @@ Full breakdown in [Features](#features).
 	- Rewrote King Safety to a Sum-of-Contributions King Danger:
 		- Safe / Unsafe Checks, Weak King-Ring Squares, Slider Blockers, King-Flank Attack / Defense, Pawnless Flank, No-Enemy-Queen
 	- Rewrote Threats: Threats by Minor / Rook / King / Pawn-Push, Hanging, Weak Queen, Knight-on-Queen and Slider-on-Queen Forks
-	- Mobility With a Pin-Excluded Mobility Area and X-Rays Through Queens (53%)
-	- Detailed Passed Pawns With King-Race and Path-to-Promotion Safety (84%)
-	- Material Imbalance Table, Subsuming the Bishop Pair (58%)
+	- Mobility With a Pin-Excluded Mobility Area and X-Rays Through Queens (53%, 27W 52D 21L Over 100 Games)
+	- Detailed Passed Pawns With King-Race and Path-to-Promotion Safety (84%, 8D 1L)
+	- Material Imbalance Table, Subsuming the Bishop Pair (58%, 26W 31D 15L Over 72 Games)
 	- Pawn-Structure Rewrite + King-on-File + Pawn-Hash Cache (57%)
-	- Space Evaluation and Knight / Slider-on-Queen Threats (65% as a Batch)
-	- Endgame Scale Factors for Drawish Endings (58%)
+	- Space Evaluation and Knight / Slider-on-Queen Threats (65% as a Batch, 13W 9D 5L, Stopped Early)
+	- Endgame Scale Factors for Drawish Endings (58%, 12W 34D 4L Over 50 Games, Played to Mate)
 	- Specialised Endgames: Exact KXK / KBNK / KNNK / KR / KQ vs Lone Piece, Plus a KPK Bitbase
 - Search Second Pass:
-	- Correction History (Pawn and Non-Pawn Static-Eval Correction Tables): 56% (~+42 Elo)
-	- ProbCut (SEE-Filtered Capture, Qsearch-Verified Then Reduced Search Above a Raised Beta)
-	- Pawn-Structure History for Quiet Move Ordering: 57% (~+49 Elo)
-	- Low-Ply Near-Root History, Reset Per Search: 50.7%
+	- Correction History (Pawn and Non-Pawn Static-Eval Correction Tables): 56% (17W 22D 11L Over 50 Games, Originally Read as ~+42 Elo)
+		- **SPRT Retest: Not Reproduced.** +4.8 ± 8.5 Elo Over 4,016 Games (Kept)
+	- ProbCut (SEE-Filtered Capture, Qsearch-Verified Then Reduced Search Above a Raised Beta): 50% (22W 56D 22L Over 100 Games)
+	- Pawn-Structure History for Quiet Move Ordering: 57% (18W 21D 11L Over 50 Games, Originally Read as ~+49 Elo)
+		- **SPRT Retest: Not Reproduced.** -5.7 ± 16.0 Elo Over 1,042 Games
+	- Low-Ply Near-Root History, Reset Per Search: 50.7% (36W 80D 34L Over 150 Games)
+		- **SPRT Retest: Not Reproduced.** +0.3 ± 11.4 Elo Over 2,008 Games
 - Every Change Individually A/B-Validated in Self-Play
 
 **Version 2.6 - 29/05/2026**

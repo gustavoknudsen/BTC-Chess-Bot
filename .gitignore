@@ -39,3 +39,8 @@ ROADMAP.md
 
 # opening books for the sprt harness (large, kept locally)
 books/
+
+# harness run artefacts: games, console output, protocol traces
+*.pgn
+*.out
+*.trace

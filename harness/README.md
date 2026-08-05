@@ -93,9 +93,15 @@ Two safeguards matter in practice. Empty outcome buckets get a prior of a thousa
 
 Fixed-node matches (`nodes=N`) are deterministic and immune to CPU load, so high concurrency does not distort them. Fixed-time matches are not: keep `-concurrency` at or below half the hardware threads, or the time control stops being honest.
 
-`restart=on` gives each game a fresh engine process. With it, a fixed-node self-play run against an identical binary produces a perfect mirror: every pair scores exactly one win and one loss, the score is exactly 50.00%, and every pair lands in the middle bucket. That is worth running occasionally as an end-to-end check of the harness, and it is the setting to use when a run needs to be exactly reproducible.
+A fixed-node self-play run of a binary against an identical copy of itself must produce a perfect mirror: every pair scores exactly one win and one loss, the score is exactly 50.00%, and every pair lands in the middle pentanomial bucket. That is the end-to-end check that the harness is unbiased, since any error in colour handling, result attribution or pairing breaks the mirror. Run it after touching the harness.
 
-Without `restart=on`, BetterThanCris does not reproduce a game exactly when it has already played one in the same process: `ucinewgame` clears the transposition table and every history table, yet the first game a process plays still diverges from later ones. This does not bias a match, since both engines are affected equally and the colours are swapped within each pair, but it does cost some of the variance reduction pairing is meant to buy. See HANDOVER.md for the investigation.
+It is also a check on the engine. The first version of this harness did not mirror, which turned out to be an engine bug rather than a harness one: the mobility areas and king-blocker sets were refreshed only by `makeMove`, so the root position of every search was evaluated against whatever the previous search's last node had left behind. `restart=on` gives each game a fresh process and papers over that class of problem, which is how the bug was first isolated; it is still worth keeping for engines whose `ucinewgame` leaves state behind.
+
+## Losses on time
+
+A run at a real time control will occasionally record a loss on time, and the `-log` file says which engine, at which move, and by how much. A handful of overruns of 100 to 200 ms in long endgames is the ordinary case on a busy laptop: the engine's own `Move Overhead` option, 50 ms by default in BetterThanCris, is what reserves time for communication latency, and 50 ms is thin when several games share the cores. Raising it for the run, `'option.Move Overhead=200'`, is the usual fix, and `-timemargin` widens the harness's own grace on top.
+
+Watch the balance rather than the count. Overruns split evenly between the two engines are noise. Overruns concentrated on one engine are a result: that engine is slower per move and is flagging for it, which is a real weakness at that time control, not an artefact.
 
 ## What the arbiter decides
 
@@ -104,5 +110,7 @@ The engines are never asked whether a game is over. The harness detects checkmat
 An engine loses the game outright when it plays an illegal move, exceeds its clock beyond `-timemargin`, fails to answer, or exits. Each of those is recorded in the `-log` file with the position, the clock state and the engine's last output, and the engine is restarted before the next game. A pair that could not be completed is discarded whole rather than counted half, so the pentanomial totals always describe every game that was scored.
 
 ## Self-test
+
+`probe.py` is a small diagnostic kept alongside the harness: it asks a fresh engine process and an engine process that has already played a game to search the same position, and prints the first `info` line on which they disagree. An engine that carries state across `ucinewgame` shows up immediately, and the depth at which the outputs first differ says whether the cause is in the evaluation or in a search table. It is what isolated the stale mobility area bug. Run it as `python harness/probe.py ./btc27.exe`.
 
 `make sprt-test` checks the arbiter against six canonical perft positions, round trips every legal move through SAN and UCI notation over a three ply tree, verifies FEN writing and reading, checks the draw and mate detection, verifies the statistics against hand computed values and their boundary behaviour, and parses a small book. It runs in well under a second and should be run after any change to the harness.

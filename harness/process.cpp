@@ -7,6 +7,9 @@
 #ifndef _WIN32
     #include <unistd.h>
     #include <signal.h>
+    #ifdef __linux__
+        #include <sys/prctl.h>
+    #endif
     #include <sys/types.h>
     #include <sys/wait.h>
     #include <errno.h>
@@ -18,12 +21,51 @@
 static Mutex spawnLock;
 static int spawnLockReady = 0;
 
+#ifdef _WIN32
+/*
+    Every engine is assigned to one job object whose limits say "kill everything
+    in this job when the last handle to it closes". The harness holds the only
+    handle, so if the harness exits, crashes, or is killed outright, the
+    operating system terminates the engines with it.
+
+    Without this, killing the harness orphans its engines. An orphan does not
+    necessarily die quietly: BetterThanCris spins on its input rather than
+    exiting at end of file, so orphans sit at full CPU forever, and enough of
+    them starve the next run badly enough to decide most of its games on time.
+*/
+static HANDLE childJob = NULL;
+
+static void ensureChildJob(void)
+{
+    if (childJob)
+        return;
+
+    childJob = CreateJobObjectA(NULL, NULL);
+    if (!childJob)
+        return;
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+    memset(&limits, 0, sizeof(limits));
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+    if (!SetInformationJobObject(childJob, JobObjectExtendedLimitInformation,
+                                 &limits, sizeof(limits)))
+    {
+        CloseHandle(childJob);
+        childJob = NULL;
+    }
+}
+#endif
+
 static void ensureSpawnLock(void)
 {
     if (!spawnLockReady)
     {
         mutexInit(&spawnLock);
         spawnLockReady = 1;
+#ifdef _WIN32
+        ensureChildJob();
+#endif
     }
 }
 
@@ -170,7 +212,9 @@ int processStart(Process *p, const char *command, const char *workDir)
     PROCESS_INFORMATION info;
     memset(&info, 0, sizeof(info));
 
-    DWORD flags = CREATE_NO_WINDOW;
+    // suspended, so the child cannot spawn anything of its own before it has
+    // been placed in the job
+    DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED;
     if (haveAttributes)
         flags |= EXTENDED_STARTUPINFO_PRESENT;
 
@@ -195,6 +239,10 @@ int processStart(Process *p, const char *command, const char *workDir)
         return 0;
     }
 
+    if (childJob)
+        AssignProcessToJobObject(childJob, info.hProcess);
+
+    ResumeThread(info.hThread);
     CloseHandle(info.hThread);
 
     p->process    = info.hProcess;
@@ -243,6 +291,11 @@ int processStart(Process *p, const char *command, const char *workDir)
             if (chdir(workDir) != 0)
                 _exit(127);
         }
+
+#ifdef __linux__
+        // the same guarantee the job object gives on Windows
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+#endif
 
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
         _exit(127);

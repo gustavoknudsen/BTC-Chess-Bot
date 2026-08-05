@@ -524,7 +524,11 @@ void parseFEN(const char *fen)
     // get hash key
     hashKey = generateHashKey();
 
+    // attack tables first, then the mobility areas that read them. both are
+    // otherwise only refreshed by makeMove, which leaves the root of a search
+    // evaluating against whatever the previous search's last node left behind.
     initAttacksTotal();
+    updateMobilityAreas();
 }
 
 // print board function

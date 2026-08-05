@@ -164,8 +164,9 @@ void parsePosition(const char* command)
             }
         }
     }
-    // update attacks
+    // update attacks, then the mobility areas derived from them
     initAttacksTotal();
+    updateMobilityAreas();
 
     // printboard()
 }
@@ -359,8 +360,11 @@ void uciLoop()
     setbuf(stdin, NULL);
     setbuf(stdout, NULL);
 
-    // define user or GUI input buffer (large number in case of large input)
-    char input[2000];
+    // GUI input buffer. this has to hold a whole "position ... moves ..." line,
+    // which grows by five characters a ply: at 2000 it overflowed around move
+    // 195, fgets silently truncated the move list, and the engine then played
+    // from a position one ply behind the GUI, returning the opponent's move.
+    char input[16384];
     /*
     // print information
     printf("id name BetterThanCris 2.2\n");
@@ -378,11 +382,12 @@ void uciLoop()
         // send output to gui
         fflush(stdout);
 
-        // get input
-        if (!fgets(input, 2000, stdin))
+        // get input. a NULL return means stdin closed: the GUI is gone, or we
+        // were orphaned when it died. exit instead of looping, or the process
+        // spins at full CPU forever with nothing left to read.
+        if (!fgets(input, sizeof(input), stdin))
         {
-            // continue the loop (returned NULL and no code should be executed)
-            continue;
+            break;
         }
 
         // trim newline character and null characters
@@ -471,8 +476,11 @@ void uciLoop()
         // move overhead option
         else if (!strncmp(input, "setoption name Move Overhead value ", 34))
         {
-            // init move overhead
-            sscanf(input, "%*s %*s %*s %*s %d", &moveOverhead);
+            // init move overhead. this option name is two words, so the value
+            // is the sixth token, not the fifth as for a one word name like
+            // Hash. skipping only four left the value unread and the setting
+            // silently ignored.
+            sscanf(input, "%*s %*s %*s %*s %*s %d", &moveOverhead);
 
             // adjust move overhead if beyond reasonable bounds
             if (moveOverhead < 0) moveOverhead = 0;
